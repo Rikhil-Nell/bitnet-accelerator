@@ -61,10 +61,24 @@ class KVCache:
     v: list = field(default_factory=list)
 
 
+def quantize_rows_i8(w: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Per-row absmax int8 for the tied embedding / LM head: w ~= q * scale[:, None]."""
+    amax = np.max(np.abs(w), axis=1).astype(np.float32)
+    scale = np.where(amax > 0, amax / np.float32(127.0), np.float32(1.0)).astype(np.float32)
+    v = w / scale[:, None]
+    q = np.sign(v) * np.floor(np.abs(v) + np.float32(0.5))
+    return np.clip(q, -127, 127).astype(np.int8), scale
+
+
 class BitNetEngine:
-    def __init__(self, model: BitNetModel, backend):
+    def __init__(self, model: BitNetModel, backend, head_int8: bool = False):
+        """head_int8: embedding lookup and LM head use per-row int8 weights and an
+        int8-quantized final hidden state, exactly as the board's int8 engine mode."""
         self.m = model
         self.backend = backend
+        self.head_int8 = head_int8
+        if head_int8:
+            self.head_q, self.head_scale = quantize_rows_i8(model.tok_embd)
         self.head_dim = model.n_embd // model.n_head
         half = self.head_dim // 2
         self.inv_freq = (1.0 / (model.rope_theta ** (np.arange(half, dtype=np.float64) * 2 / self.head_dim))).astype(
@@ -141,7 +155,11 @@ class BitNetEngine:
         pos = np.arange(self.n_past, self.n_past + T)
         hd, nh, nkv = self.head_dim, m.n_head, m.n_head_kv
         group = nh // nkv
-        x = m.tok_embd[np.array(tokens)].astype(np.float32)
+        if self.head_int8:
+            ids = np.array(tokens)
+            x = self.head_q[ids].astype(np.float32) * self.head_scale[ids, None]
+        else:
+            x = m.tok_embd[np.array(tokens)].astype(np.float32)
 
         verbose = getattr(self.backend, "verbose", False)
         for i, L in enumerate(m.layers):
@@ -181,4 +199,16 @@ class BitNetEngine:
 
         self.n_past += T
         h = rms_norm(x[-1:], m.output_norm, m.rms_eps)
-        return (h @ m.tok_embd.T)[0]
+        if not self.head_int8:
+            return (h @ m.tok_embd.T)[0]
+        return self.lm_head_int8(h)[0]
+
+    def lm_head_int8(self, h: np.ndarray) -> np.ndarray:
+        """Exact int32 dot products (as the PL computes them), in K chunks small enough
+        that float32 partial sums stay exact (< 2^24), then per-row and activation scales."""
+        hq, s = quantize_act_i8(h)
+        acc = np.zeros((h.shape[0], self.head_q.shape[0]), dtype=np.int64)
+        for k0 in range(0, h.shape[1], 512):
+            wq = self.head_q[:, k0 : k0 + 512].astype(np.float32)
+            acc += (hq[:, k0 : k0 + 512].astype(np.float32) @ wq.T).astype(np.int64)
+        return (acc.astype(np.float32) * self.head_scale[None, :]) / s
