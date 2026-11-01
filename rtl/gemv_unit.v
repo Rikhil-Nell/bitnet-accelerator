@@ -163,6 +163,9 @@ module gemv_unit (
             a2 <= bank2[act_raddr];
             a3 <= bank3[act_raddr];
             a4 <= bank4[act_raddr];
+        end
+        // second vector: only read (and toggle the second tree) in two-vector mode
+        if (act_re && nb2_q) begin
             b0 <= bnkb0[act_raddr];
             b1 <= bnkb1[act_raddr];
             b2 <= bnkb2[act_raddr];
@@ -223,9 +226,11 @@ module gemv_unit (
     always @(posedge clk) begin
         codes_t <= codes;
         act_t   <= act_r;
-        actb_t  <= actb_r;
+        actb_t  <= nb2_q ? actb_r : 320'd0;   // idle second tree sees constant zeros
         w_t     <= w_r;
-        case (sel_r)
+        if (!mode_q)
+            act_sel <= 64'd0;            // int8 multipliers idle in T5 mode (power)
+        else case (sel_r)
             3'd0: act_sel <= act_r[63:0];
             3'd1: act_sel <= act_r[127:64];
             3'd2: act_sel <= act_r[191:128];
