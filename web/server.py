@@ -222,6 +222,8 @@ def main() -> int:
     ap.add_argument("--baud", type=int, default=115200)
     ap.add_argument("--replay", action="store_true", help="no board: replay a recorded answer")
     ap.add_argument("--http", type=int, default=8000)
+    ap.add_argument("--host", default="127.0.0.1",
+                    help="0.0.0.0 lets other devices on the network (Wi-Fi or Ethernet) open the page")
     args = ap.parse_args()
     import uvicorn
     tok = load_tokenizer()
@@ -233,8 +235,8 @@ def main() -> int:
                     break
         except Exception as e:  # noqa: BLE001
             print(f"note: candidate trace not available ({e})")
-    print(f"http://127.0.0.1:{args.http}  ({'replay' if board is None else args.port})")
-    uvicorn.run(make_app(board, tok), host="127.0.0.1", port=args.http, log_level="warning")
+    print(f"http://{args.host}:{args.http}  ({'replay' if board is None else args.port})")
+    uvicorn.run(make_app(board, tok), host=args.host, port=args.http, log_level="warning")
     return 0
 
 
