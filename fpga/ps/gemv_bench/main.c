@@ -31,7 +31,7 @@
 #define R_Y(u)      (0x24u + 8u * (u))
 #define NU          4
 /* Actual FCLK0: 1000 MHz IO PLL / 7 (150 was requested; PCW_ACT_FPGA0_PERIPHERAL_FREQMHZ). */
-#define PL_KHZ      142857u
+static uint32_t PL_KHZ = 142857u;   /* follows set_fclk() */
 #define BUF_BASE    0x10000000u   /* test buffers live above the program */
 #define BUF_END     0x3F000000u
 
@@ -379,8 +379,42 @@ static void token(void) {
     heap = mark;
 }
 
+/* FCLK0 = 1000 MHz IO PLL / div. Lower clock = lower bandwidth and power. */
+static void set_fclk(uint32_t div) {
+    Xil_Out32(0xF8000008u, 0xDF0Du);
+    uint32_t v = Xil_In32(0xF8000170u);
+    Xil_Out32(0xF8000170u, (v & ~(0x3Fu << 8)) | (div << 8));
+    Xil_Out32(0xF8000004u, 0x767Bu);
+    PL_KHZ = 1000000u / div;
+}
+
+/* Power sweep: stream a 52 MB T5 matrix repeatedly at rising clocks. On a weak
+   supply the board browns out at some step; the last line printed says where. */
+static void power_sweep(void) {
+    static const uint32_t divs[] = {12, 10, 9, 8, 7};
+    xil_printf("\r\n[0] power sweep: 20 x 52 MB per clock step\r\n");
+    for (unsigned i = 0; i < 5; i++) {
+        set_fclk(divs[i]);
+        xil_printf("  FCLK %u kHz ... ", PL_KHZ);
+        uint32_t mark = heap;
+        cmd_t c;
+        layout(&c, 0, 2560, 4 * 25616, 0);
+        fill_x(c.x, c.k);
+        uint32_t slice = 25616u * 512u, best = 0;
+        for (int u = 0; u < NU; u++) c.w[u] = c.w[0] + (uint32_t)u * slice;
+        for (int r = 0; r < 20; r++) {
+            uint32_t cyc = run(&c);
+            uint32_t m = mbps(bytes_streamed(&c), cyc);
+            if (m > best) best = m;
+        }
+        xil_printf("survived, %u MB/s\r\n", best);
+        heap = mark;
+    }
+}
+
 int main(void) {
     xil_printf("\r\n==== gemv_bench ====\r\n");
+    power_sweep();
     uint32_t ver = csr_r(R_VERSION);
     int v3 = ver == 0x47454D33u;
     xil_printf("engine version %08x %s\r\n", ver, ver == 0x47454D32u ? "(GEM2)" : v3 ? "(GEM3)" : "(UNEXPECTED)");

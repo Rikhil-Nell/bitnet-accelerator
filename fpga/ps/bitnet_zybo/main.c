@@ -1273,6 +1273,20 @@ int main(void) {
             case 'M': { int m = 0; parse_int(line + 1, &m); set_mem_mode(m);
                         xil_printf("OK mem_mode=%d\r\n", mem_mode); break; }
             case 'B': bench_kernels(); xil_printf("OK\r\n"); break;
+            case 'F': {   /* FCLK0 = 1000 MHz IO PLL / div (7 = 142.9 MHz). Lower = less power. */
+                int div = 0;
+                parse_int(line + 1, &div);
+                if (div >= 7 && div <= 20 && gemv_done()) {
+                    Xil_Out32(0xF8000008u, 0xDF0Du);                  /* SLCR unlock */
+                    uint32_t v = Xil_In32(0xF8000170u);               /* FPGA0_CLK_CTRL */
+                    v = (v & ~(0x3Fu << 8)) | ((uint32_t)div << 8);   /* DIVISOR0 */
+                    Xil_Out32(0xF8000170u, v);
+                    Xil_Out32(0xF8000004u, 0x767Bu);                  /* SLCR lock */
+                }
+                uint32_t d0 = (Xil_In32(0xF8000170u) >> 8) & 0x3Fu, d1 = (Xil_In32(0xF8000170u) >> 20) & 0x3Fu;
+                xil_printf("OK fclk0 = 1000 MHz / %u / %u\r\n", d0, d1);
+                break;
+            }
             case 'O': use_overlap = !use_overlap; xil_printf("OK overlap=%d\r\n", use_overlap); break;
             case 'A': attn_v3 = !attn_v3; xil_printf("OK attn_v3=%d\r\n", attn_v3); break;
             case 'D': dual_core = !dual_core;
