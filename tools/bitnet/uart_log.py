@@ -22,9 +22,10 @@ def main() -> int:
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
 
-    import serial
 
-    ser = serial.Serial(args.port, args.baud, timeout=0.5)
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from serial_port import open_port
+    ser = open_port(args.port, args.baud, 0.5)
     ser.reset_input_buffer()
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)

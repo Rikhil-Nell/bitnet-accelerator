@@ -10,7 +10,8 @@ Design reference: `docs/ARCHITECTURE.md`. Status: `STATUS.md`.
 ## Board and part
 
 - Board: **Digilent Zybo Z7-10**, part `xc7z010clg400-1`, board part `digilentinc.com:zybo-z7-10:part0:1.2`
-- Board repo: `D:\xilinx-tools\vivado-boards\new\board_files`
+- Tool, board-file and model paths: `local.mk` / `SETUP.md` (defaults `D:\Xilinx`, `D:\xilinx-tools`).
+- Power: on USB power run the engine at 83-100 MHz (brownout above ~3.2 GB/s); 142.9 MHz needs the 5 V barrel supply.
 
 ## Toolchain
 
@@ -22,7 +23,7 @@ Design reference: `docs/ARCHITECTURE.md`. Status: `STATUS.md`.
 - Simulate (`make sim`, Vivado xsim) before synthesis whenever RTL changes.
 - Scripts over GUI; never commit generated Vivado/Vitis output (`build/` is ignored).
 - `tools/bitnet/engine.py` is the golden model for every layer output.
-- Ternary encoding for the engine: signed 2-bit, `00`=0, `01`=+1, `11`=−1, 32 trits per 64-bit word, row-major.
+- Engine weight format (v3): T5, five ternary weights per byte in base 3, 40 per 64-bit beat, row-major (`tools/bitnet/engine_format.py`).
 
 ## Hardware safety
 

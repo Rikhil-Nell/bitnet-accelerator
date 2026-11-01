@@ -10,15 +10,17 @@ Design: `docs/ARCHITECTURE.md`. Results: `docs/results/`.
    the board browns out and resets (FPGA DONE drops, the UART disappears). Vivado estimates
    1.84 W on-chip (PS7 1.42 W), plus DDR3L, regulators and the rest of the board.
 1. SD card (FAT32 or exFAT; superfloppy or partition 1) with `BITNET.BIN` (v2, 782 MiB)
-   in the root: `make pack` writes it to `D:\xilinx-tools\BITNET.BIN`. Board powered, USB
+   in the root: `make pack` writes it to `$(BITNET_WORK)/BITNET.BIN`. Board powered, USB
    connected.
 2. `make board`: programs the FPGA, starts both ARM cores, loads the weights (~45 s from
    SD, ~3 s if they are still in DDR from the previous run), prints `READY`.
 3. `make chat` (terminal) or `make demo` (web page with the write-up, chat and live
    profile at http://127.0.0.1:8000).
 
-Firmware switches over the UART (each toggles): `S` speculative decoding, `D` second core,
-`O` streamed pass, `A` attention kernel, `C` candidate trace, `B` kernel micro-benchmark.
+Firmware commands over the UART (`python tools/bitnet/board_cmd.py "<cmd>"`): `F <div>` engine
+clock (1000 MHz / div; boots at 12 = 83 MHz, 7 = 142.9 MHz needs a 5 V supply), and toggles
+`D` second core, `N` speculative guessing (off = same pass without guesses, to check exactness),
+`C` top-5 candidate trace.
 
 ## Milestones
 

@@ -8,7 +8,7 @@ from pathlib import Path
 os.environ["VITIS_EMBEDDED_INSTALL"] = "true"
 
 REPO = Path(__file__).resolve().parents[2]
-WS = Path(os.environ.get("BITNET_VITIS_WS", str(Path(os.environ.get("BITNET_WORK", "D:/xilinx-tools")) / "vitis_ws")))
+WS = Path(os.environ.get("BITNET_VITIS_WS") or (Path(os.environ.get("BITNET_WORK") or "D:/xilinx-tools") / "vitis_ws"))
 APP = os.environ.get("BITNET_PS_APP", "gemv_bench")
 PS_SRC = REPO / "fpga/ps" / APP
 

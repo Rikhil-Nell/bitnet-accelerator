@@ -32,6 +32,16 @@
 #define NU          4
 /* Actual FCLK0: 1000 MHz IO PLL / 7 (150 was requested; PCW_ACT_FPGA0_PERIPHERAL_FREQMHZ). */
 static uint32_t PL_KHZ = 142857u;   /* follows set_fclk() */
+
+/* Engine clock for the bench: 1000 MHz / BENCH_FCLK_DIV. 12 (83 MHz) is safe on USB power;
+   7 (142.9 MHz, full bandwidth) needs the 5 V barrel supply. BENCH_POWER_SWEEP=1 adds a
+   clock sweep that shows where a weak supply browns the board out (it will reset). */
+#ifndef BENCH_FCLK_DIV
+#define BENCH_FCLK_DIV 12
+#endif
+#ifndef BENCH_POWER_SWEEP
+#define BENCH_POWER_SWEEP 0
+#endif
 #define BUF_BASE    0x10000000u   /* test buffers live above the program */
 #define BUF_END     0x3F000000u
 
@@ -388,6 +398,7 @@ static void set_fclk(uint32_t div) {
     PL_KHZ = 1000000u / div;
 }
 
+#if BENCH_POWER_SWEEP
 /* Power sweep: stream a 52 MB T5 matrix repeatedly at rising clocks. On a weak
    supply the board browns out at some step; the last line printed says where. */
 static void power_sweep(void) {
@@ -411,10 +422,15 @@ static void power_sweep(void) {
         heap = mark;
     }
 }
+#endif
 
 int main(void) {
     xil_printf("\r\n==== gemv_bench ====\r\n");
+#if BENCH_POWER_SWEEP
     power_sweep();
+#endif
+    set_fclk(BENCH_FCLK_DIV);
+    xil_printf("engine clock %u kHz\r\n", PL_KHZ);
     uint32_t ver = csr_r(R_VERSION);
     int v3 = ver == 0x47454D33u;
     xil_printf("engine version %08x %s\r\n", ver, ver == 0x47454D32u ? "(GEM2)" : v3 ? "(GEM3)" : "(UNEXPECTED)");

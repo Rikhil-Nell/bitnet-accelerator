@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from engine import BitNetEngine, EmulatedAccelerator  # noqa: E402
 from gguf_model import DEFAULT_GGUF, load_model  # noqa: E402
 
-HF_DIR = Path(os.environ.get("BITNET_HF_DIR", "C:/AI/models/BitNet-b1.58-2B-4T"))
+HF_DIR = Path((os.environ.get("BITNET_HF_DIR") or "C:/AI/models/BitNet-b1.58-2B-4T"))
 STOP_IDS = {128001, 128009}
 
 

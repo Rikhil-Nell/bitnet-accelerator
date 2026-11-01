@@ -4,36 +4,40 @@
 XILINX_ROOT    ?= D:/Xilinx
 XILINX_VERSION ?= 2026.1
 BITNET_WORK    ?= D:/xilinx-tools
-export XILINX_ROOT XILINX_VERSION BITNET_WORK BITNET_GGUF BITNET_HF_DIR BITNET_CPP_ROOT BITNET_BOARD_FILES
+export XILINX_ROOT XILINX_VERSION BITNET_WORK
+# optional overrides: exported only when set (an empty value would replace the default)
+$(foreach v,BITNET_GGUF BITNET_HF_DIR BITNET_CPP_ROOT BITNET_BOARD_FILES,$(if $($(v)),$(eval export $(v))))
 PYTHON ?= python
 COM    ?= COM4
 PS     := powershell -NoProfile
 ENV    := . '$(CURDIR)/tools/setup/env.ps1';
 
-.PHONY: help board chat web demo demo-replay bench sim bitstream ps-app ps-app-rebuild check-ftdi list-hw program run-ps srst pack generate-emulated bitnet-cpp-build
+.PHONY: help board chat web demo demo-replay bench sim bitstream ps-app ps-app-rebuild check-ftdi list-hw program run-ps srst pack generate-emulated
 
+# $(info) prints without a shell (make uses cmd.exe or sh depending on the caller)
+empty :=
+I := $(empty)  $(empty)
 help:
-	@echo "Run it (board on, SD card with BITNET.BIN in the slot)"
-	@echo "  board [FCLK_DIV=7]  program the FPGA and boot the model (engine at 83 MHz; 7 = 142.9 MHz, needs 5 V supply)"
-	@echo "  chat [COM=COM4]     chat with the model from this PC"
-	@echo "  demo [COM=COM4]     web page: write-up + live chat/profile, http://127.0.0.1:8000"
-	@echo "  demo-replay         the same page without a board (recorded answer)"
-	@echo "  bench               engine benchmark on the board (prints to COM4)"
-	@echo "Engine"
-	@echo "  sim [STALL=25]      xsim gemv_top vs NumPy vectors (random AXI stalls)"
-	@echo "  bitstream [FCLK=150] block design + synth + impl + XSA (build/vivado/)"
-	@echo "  ps-app [APP=gemv_bench]        Vitis platform (from XSA) + bare-metal app"
-	@echo "  ps-app-rebuild [APP=...]       rebuild app sources only"
-	@echo "Board / JTAG"
-	@echo "  check-ftdi          FTDI bus/port driver versions match (guards all JTAG targets)"
-	@echo "  list-hw             list JTAG targets"
-	@echo "  program             program the bitstream (build/vivado/bitnet_zybo.bit)"
-	@echo "  run-ps ELF=...      ps7_init + download and run an ELF on A9 #0"
-	@echo "  srst                JTAG system reset of the PS (A9 debug port stuck; then make board)"
-	@echo "Model"
-	@echo "  pack                write $(BITNET_WORK)/BITNET.BIN from the GGUF (copy to SD root)"
-	@echo "  generate-emulated PROMPT=...   reference generation on the PC (NumPy)"
-	@echo "  bitnet-cpp-build    build Microsoft bitnet.cpp (reference)"
+	$(info Run it (board on, SD card with BITNET.BIN in the slot))
+	$(info $(I)board [FCLK_DIV=7]  program the FPGA and boot the model (engine at 83 MHz; 7 = 142.9 MHz, needs 5 V supply))
+	$(info $(I)chat [COM=COM4]     chat with the model from this PC)
+	$(info $(I)demo [COM=COM4]     web page: write-up + live chat/profile, http://127.0.0.1:8000)
+	$(info $(I)demo-replay         the same page without a board (recorded answer))
+	$(info $(I)bench               engine benchmark on the board (prints to COM4))
+	$(info Engine)
+	$(info $(I)sim [STALL=25]      xsim gemv_top vs NumPy vectors (random AXI stalls))
+	$(info $(I)bitstream [FCLK=150] block design + synth + impl + XSA (build/vivado/))
+	$(info $(I)ps-app [APP=gemv_bench]        Vitis platform (from XSA) + bare-metal app)
+	$(info $(I)ps-app-rebuild [APP=...]       rebuild app sources only)
+	$(info Board / JTAG)
+	$(info $(I)check-ftdi          FTDI bus/port driver versions match (guards all JTAG targets))
+	$(info $(I)list-hw             list JTAG targets)
+	$(info $(I)program             program the bitstream (build/vivado/bitnet_zybo.bit))
+	$(info $(I)run-ps ELF=...      ps7_init + download and run an ELF on A9 #0)
+	$(info $(I)srst                JTAG system reset of the PS (A9 debug port stuck; then make board))
+	$(info Model)
+	$(info $(I)pack                write $(BITNET_WORK)/BITNET.BIN from the GGUF (copy to SD root))
+	$(info $(I)generate-emulated PROMPT=...   reference generation on the PC (NumPy))
 
 sim:
 	$(PS) -File fpga/scripts/sim_gemv.ps1 -Stall $(if $(STALL),$(STALL),25)
@@ -103,6 +107,3 @@ pack:
 
 generate-emulated:
 	$(PYTHON) tools/bitnet/generate.py --backend emulated -p "$(if $(PROMPT),$(PROMPT),What is the capital of France?)"
-
-bitnet-cpp-build:
-	$(PS) -File tools/setup/build_bitnet_cpp.ps1

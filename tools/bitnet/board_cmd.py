@@ -11,7 +11,6 @@ import sys
 import time
 from pathlib import Path
 
-import serial
 
 
 def main() -> int:
@@ -35,7 +34,9 @@ def main() -> int:
         line = "R\nG %d %s" % (args.max, " ".join(map(str, ids)))
         args.until = r"^(E |X )"
 
-    ser = serial.Serial(args.port, 115200, timeout=0.5)
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from serial_port import open_port
+    ser = open_port(args.port, 115200, 0.5)
     ser.reset_input_buffer()
     if line:
         ser.write((line + "\n").encode())

@@ -59,8 +59,8 @@ class Board:
     """Serial link to bitnet_zybo. One generation at a time."""
 
     def __init__(self, port: str, baud: int):
-        import serial
-        self.ser = serial.Serial(port, baud, timeout=0.2)
+        from serial_port import open_port
+        self.ser = open_port(port, baud, 0.2)
         self.lock = threading.Lock()
         self.buf = b""
 

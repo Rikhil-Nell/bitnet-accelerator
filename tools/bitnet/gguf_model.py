@@ -16,16 +16,14 @@ from pathlib import Path
 
 import numpy as np
 
-BITNET_ROOT = Path(os.environ.get("BITNET_CPP_ROOT", "D:/src/BitNet"))
+BITNET_ROOT = Path((os.environ.get("BITNET_CPP_ROOT") or "D:/src/BitNet"))
 sys.path.insert(0, str(BITNET_ROOT / "3rdparty" / "llama.cpp" / "gguf-py"))
 
 import gguf  # noqa: E402
 
 DEFAULT_GGUF = Path(
-    os.environ.get(
-        "BITNET_GGUF",
-        "C:/AI/models/BitNet-b1.58-2B-4T-gguf/ggml-model-i2_s.gguf",
-    )
+    os.environ.get("BITNET_GGUF")
+    or "C:/AI/models/BitNet-b1.58-2B-4T-gguf/ggml-model-i2_s.gguf"
 )
 
 PROJ_NAMES = ("attn_q", "attn_k", "attn_v", "attn_output", "ffn_gate", "ffn_up", "ffn_down")

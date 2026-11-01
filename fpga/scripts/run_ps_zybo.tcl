@@ -87,6 +87,11 @@ if {!$skip_elf} {
   if {[info exists ::env(BITNET_CPU1_ENTRY)] && $::env(BITNET_CPU1_ENTRY) ne "" && $cpu1 ne ""} {
     after 200
     targets -set $cpu1
+    # Reset CPU1 alone first: a previous firmware left its MMU on with a page table
+    # that the new ELF may have overwritten, and the first fetch at cpu1_entry would
+    # then fault before cpu1_entry can switch the MMU off.
+    if {[catch {rst -processor} msg]} { puts "XSDB: CPU1 rst -processor: $msg" }
+    after 100
     catch {stop}
     rwr cpsr 0xdf
     rwr pc $::env(BITNET_CPU1_ENTRY)

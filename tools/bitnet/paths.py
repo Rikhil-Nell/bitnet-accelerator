@@ -9,4 +9,4 @@ BITNET_CPP_ROOT  bitnet.cpp checkout, for its gguf-py package (gguf_model.py)
 import os
 from pathlib import Path
 
-WORK = Path(os.environ.get("BITNET_WORK", "D:/xilinx-tools"))
+WORK = Path((os.environ.get("BITNET_WORK") or "D:/xilinx-tools"))

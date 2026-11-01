@@ -23,9 +23,9 @@ BAUD = 115200
 
 class Board:
     def __init__(self, port: str, show_logs: bool):
-        import serial
+        from serial_port import open_port
 
-        self.ser = serial.Serial(port, BAUD, timeout=1)
+        self.ser = open_port(port, BAUD, 1)
         self.show_logs = show_logs
 
     def line(self, timeout: float = 600.0) -> str:

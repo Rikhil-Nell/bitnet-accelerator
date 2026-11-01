@@ -1,64 +1,15 @@
-# Toolchain setup (Zybo Z7-10, install on `D:`)
+# tools/setup
 
-## Already on this machine
+Installation steps for a new machine are in the top-level [`SETUP.md`](../../SETUP.md).
+These scripts are called by the Makefile; paths come from `local.mk` / environment variables.
 
-| Item | Location |
-|------|----------|
-| Digilent board files (Zybo Z7-10) | `D:\xilinx-tools\vivado-boards\new\board_files\zybo-z7-10\A.0` |
-| Ross skills repo | `D:\xilinx-tools\ross-ai-assistant` |
-| Batch install config (draft) | `tools/setup/install_config_zybo.txt` |
-| Environment helper | `tools/setup/env.ps1` |
-
-## Disk budget
-
-- **D: ~154 GB free** — enough for a **Zynq-7000–only** Vivado + Vitis embedded install if you do **not** install every device family.
-- Full unified SFD images are **100+ GB**; use the **web installer** and select **Zynq-7000** only.
-
-## Step 1 — AMD account + web installer
-
-1. Create/login: [AMD adaptive downloads](https://www.amd.com/en/support/downloads/adaptive-socs-and-fpgas/development-tools/2025-1.html)
-2. Download **Windows Self Extracting Web Installer** (2025.1 or 2025.1.1).
-3. Save to `D:\xilinx-tools\downloads\`
-4. Run the `.exe` (GUI is fine for first time):
-   - **Download and Install**
-   - Edition: **Vitis Unified** (includes Vivado + embedded Vitis)
-   - Install location: **`D:\Xilinx`** (no spaces)
-   - Devices: **Zynq-7000** only
-   - Skip Versal / UltraScale+ / etc.
-
-Or extract the web client and batch-install (Admin PowerShell):
-
-```powershell
-cd D:\xilinx-tools\downloads
-.\FPGAs_AdaptiveSoCs_Unified_Web_*.exe -y -gm2 -nr -InstallPath="D:\xilinx-tools\wi-client"
-cd D:\xilinx-tools\wi-client\bin
-.\xsetup.bat --agree XilinxEULA,3rdPartyEULA --batch ConfigGen --edition "Vitis Unified Software Platform" --location D:\Xilinx
-# Edit the generated install_config.txt, then:
-.\xsetup.bat --agree XilinxEULA,3rdPartyEULA --batch Install --config <path-to-config>
-```
-
-**Do not use `xsct`** on 2026.x; use **Vitis Python API** + **Python XSDB** (see UG1400).
-
-## Step 2 — Board files
-
-Point Vivado at the repo (no copy needed):
-
-- **Settings → Vivado Store → Board Repository →** add `D:\xilinx-tools\vivado-boards\new\board_files`
-
-Or copy `zybo-z7-10` into `D:\Xilinx\<version>\Vivado\data\boards\board_files\`.
-
-## Step 3 — Verify install
-
-```powershell
-. C:\Users\Rikhil Nellimarla\Projects\bitnet-accelerator\tools\setup\env.ps1
-vivado -version
-```
-
-## Step 4 — Ross (optional, after Vivado works)
-
-1. [Ross downloads](https://www.amd.com/en/support/downloads/ross-agentic-ai.html) — install **Vivado AI Extension (.vsix)** in Cursor **or** standalone **vivado-mcp-server** exe.
-2. Copy/link skills from `D:\xilinx-tools\ross-ai-assistant` per AMD README.
-
-## Step 5 — Simulation
-
-RTL testbenches run in Vivado xsim through `make sim`; Icarus is not needed.
+| Script | Used by | What it does |
+|---|---|---|
+| `env.ps1` | most targets | loads the Vivado/Vitis environment (`XILINX_ROOT`, `XILINX_VERSION`) and the board-file path |
+| `vitis_run.ps1` | `make ps-app*` | runs a Vitis Python script; stops leftover Vitis servers before and after |
+| `run_ps_xsdb.ps1` | `make board`, `run-ps`, `srst` | XSDB with a minimal PATH; finds the second core's entry point in the ELF |
+| `stop_hw_server.ps1` | `make board` | stops a lingering `hw_server` (it can leave the A9 debug port unreachable) |
+| `check_ftdi_drivers.ps1` | every JTAG target | refuses to run when the FTDI bus and port driver versions differ |
+| `link-board-files.ps1` | once, optional | links the Digilent board files into the Vivado install |
+| `install_config_zybo.txt` | once, optional | batch-install config for a Zynq-7000-only Vivado/Vitis |
+| `diagnose_zybo_usb.ps1`, `find_recent_bugcheck.ps1` | troubleshooting | USB/JTAG and crash diagnostics (`docs/ZYBO_JTAG.md`) |

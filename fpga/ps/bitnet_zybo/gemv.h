@@ -1,12 +1,12 @@
-/* Driver for the PL GEMV engine v2 (rtl/gemv_top.v, "GEM2"). Register map:
+/* Driver for the PL GEMV engine v3 (rtl/gemv_top.v, "GEM3"). Register map:
  *   0x00 CTRL  (write 1: start)          0x04 STATUS (bit0 done, bit2 error)
  *   0x08 MODE  (0 = T5 ternary, 1 = int8) 0x0C X_BEATS (K_padded / 8)
  *   0x10 ROWS  (per unit)                0x14 X address
- *   0x18 CYCLES                          0x1C VERSION ("GEM2")
+ *   0x18 CYCLES                          0x1C VERSION ("GEM3")
  *   0x20 + 8u  W address of unit u       0x24 + 8u  Y address of unit u
- *   0x40 + 4u  PROGRESS of unit u (write bursts acknowledged: 32 rows each)
+ *   0x40 + 4u  PROGRESS of unit u (write bursts acknowledged: 32 rows each, 16 with NB)
  *   0x50 ROW_BEATS (beats per weight row)
- *   0x54 NB (GEM3: 1 = two activation vectors, x at x and x + 8 * X_BEATS; y = {y_a, y_b} per row)
+ *   0x54 NB (1 = two activation vectors, x at x and x + 8 * X_BEATS; y = {y_a, y_b} per row)
  */
 #ifndef GEMV_H
 #define GEMV_H
@@ -15,7 +15,6 @@
 #include "xil_io.h"
 
 #define GEMV_BASE    0x43C00000u
-#define GEMV_VERSION 0x47454D32u   /* "GEM2" */
 #define GEMV_VERSION3 0x47454D33u  /* "GEM3": GEM2 + NB register (0x54), two vectors */
 #define GEMV_NU      4
 #define GEMV_KHZ     142857u   /* actual FCLK0: 1000 MHz / 7 */
@@ -51,18 +50,7 @@ static inline void gemv_start_nb(int mode, const void *w, uint32_t ustride, cons
     gemv_w(0x00, 1u);
 }
 
-static inline void gemv_start(int mode, const void *w, uint32_t ustride, const int8_t *x,
-                              int32_t *y, int n, int k) {
-    gemv_start_nb(mode, w, ustride, x, y, n, k, 1);
-}
-
 static inline int gemv_done(void) { return gemv_r(0x04) & 1u; }
-
-/* rows of unit u already written to DDR (all of them once the run is done) */
-static inline uint32_t gemv_rows_done(int u, uint32_t rows_per_unit) {
-    uint32_t r = gemv_r(0x40 + 4u * (uint32_t)u) * 32u;
-    return r < rows_per_unit ? r : rows_per_unit;
-}
 
 static inline uint32_t gemv_wait(void) {
     uint32_t st;
