@@ -37,6 +37,10 @@ if {$apu eq ""} {
 
 targets -set $apu
 catch {stop}
+# Reset A9 #0 only (PL and DDR untouched): clears a pending abort left by the previous app.
+if {[catch {rst -processor} msg]} { puts "XSDB: rst -processor: $msg" }
+after 500
+catch {stop}
 if {![file exists $ps7_tcl]} {
   puts "ERROR: Missing $ps7_tcl (run make bitstream; it copies ps7_init.tcl there)"
   exit 1

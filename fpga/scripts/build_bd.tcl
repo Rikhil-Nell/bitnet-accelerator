@@ -74,7 +74,7 @@ save_bd_design
 
 set bd_file [get_files design_1.bd]
 make_wrapper -files $bd_file -top
-add_files -norecurse [glob [file join $proj_dir bitnet_zybo.gen sources_1 bd design_1 hdl design_1_wrapper.v]]
+add_files -norecurse [file join $proj_dir bitnet_zybo.gen sources_1 bd design_1 hdl design_1_wrapper.v]
 set_property top design_1_wrapper [current_fileset]
 update_compile_order -fileset sources_1
 
@@ -96,7 +96,8 @@ puts "TIMING: FCLK0=${fclk_mhz} MHz WNS=$wns ns WHS=$whs ns"
 
 file copy -force [file join $proj_dir bitnet_zybo.runs impl_1 design_1_wrapper.bit] [file join $out_dir bitnet_zybo.bit]
 write_hw_platform -fixed -force -include_bit -file [file join $out_dir bitnet_zybo.xsa]
-file copy -force [glob [file join $proj_dir bitnet_zybo.gen sources_1 bd design_1 ip design_1_ps7_0 ps7_init.tcl]] \
+# (no glob: it brace-wraps paths with spaces)
+file copy -force [file join $proj_dir bitnet_zybo.gen sources_1 bd design_1 ip design_1_ps7_0 ps7_init.tcl] \
   [file join $out_dir ps7_init.tcl]
 if {$wns < 0 || $whs < 0} {
   error "Timing not met (WNS=$wns WHS=$whs) at ${fclk_mhz} MHz"

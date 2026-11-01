@@ -39,7 +39,11 @@ def main() -> int:
     if WS.exists() and (not stamp.is_file() or stamp.read_text().strip() != str(XSA.stat().st_mtime_ns)
                         or not (WS / "_ide").exists()):
         print(f"XSA changed: recreating workspace {WS}")
-        shutil.rmtree(WS)
+        def _force(func, path, _exc):   # Vitis leaves read-only files behind
+            os.chmod(path, 0o666)
+            func(path)
+
+        shutil.rmtree(WS, onexc=_force)
     WS.mkdir(parents=True, exist_ok=True)
     stamp.write_text(str(XSA.stat().st_mtime_ns))
     ide = WS / "_ide"

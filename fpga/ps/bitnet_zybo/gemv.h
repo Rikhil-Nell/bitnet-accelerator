@@ -9,7 +9,7 @@
 #define GEMV_BASE    0x43C00000u
 #define GEMV_VERSION 0x47454D31u   /* "GEM1" */
 #define GEMV_NU      4
-#define GEMV_MHZ     150u
+#define GEMV_KHZ     142857u   /* actual FCLK0: 1000 MHz / 7 */
 
 enum { GEMV_TERNARY = 0, GEMV_INT8 = 1 };
 

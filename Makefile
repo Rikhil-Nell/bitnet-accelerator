@@ -24,8 +24,9 @@ help:
 sim:
 	$(PS) -File fpga/scripts/sim_gemv.ps1 -Stall $(if $(STALL),$(STALL),25)
 
+bitstream: export BITNET_FCLK_MHZ := $(FCLK)
 bitstream:
-	$(PS) -Command "$$env:BITNET_FCLK_MHZ='$(FCLK)'; $(ENV) vivado -mode batch -nojournal -source fpga/scripts/build_bd.tcl -log build/vivado/bitstream.log"
+	$(PS) -Command "$(ENV) vivado -mode batch -nojournal -source fpga/scripts/build_bd.tcl -log build/vivado/bitstream.log"
 
 APP ?= gemv_bench
 VITIS = $(PS) -File tools/setup/vitis_run.ps1 -App $(APP) -Script
@@ -45,8 +46,9 @@ list-hw: check-ftdi
 program: check-ftdi
 	$(PS) -Command "$(ENV) vivado -mode batch -nojournal -source fpga/scripts/program_zybo.tcl -log build/vivado/program.log"
 
+run-ps: export BITNET_ELF := $(ELF)
 run-ps: check-ftdi
-	$(PS) -Command "$$env:BITNET_ELF='$(ELF)'; & tools/setup/run_ps_xsdb.ps1"
+	$(PS) -File tools/setup/run_ps_xsdb.ps1
 
 generate-emulated:
 	$(PYTHON) tools/bitnet/generate.py --backend emulated -p "$(if $(PROMPT),$(PROMPT),What is the capital of France?)"

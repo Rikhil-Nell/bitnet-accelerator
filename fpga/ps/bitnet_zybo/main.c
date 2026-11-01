@@ -16,10 +16,19 @@
 #include <math.h>
 #include <stdint.h>
 #include <string.h>
+/* ffconf.h only picks up the library's xilffs_config.h (LFN, exFAT, read-only) under
+   SDT. Without it the app sees a different FATFS layout than libxilffs was built
+   with, and f_mount() writes past the end of our FATFS object. */
+#ifndef SDT
+#define SDT
+#endif
 #include "ff.h"
+#include "diskio.h"
+_Static_assert(FF_FS_EXFAT == 1 && FF_USE_LFN != 0 && FF_FS_READONLY == 1,
+               "FatFs config differs from the xilffs library build");
 #include "xil_cache.h"
 #include "xil_printf.h"
-#include "xiltimer.h"
+#include "xil_io.h"
 #include "gemv.h"
 
 /* ---------------- memory map (DDR) ---------------- */
@@ -78,8 +87,16 @@ static int verbose = 0;
 static uint32_t pl_cycles = 0;
 
 /* ---------------- small helpers ---------------- */
-static uint64_t now(void) { XTime t; XTime_GetTime(&t); return t; }
-static uint32_t ms_since(uint64_t t0) { return (uint32_t)((now() - t0) * 1000ull / (uint64_t)(COUNTS_PER_SECOND)); }
+/* ARM global timer (CPU clock / 2), read directly: the 2026 BSP's XTime path reads 0. */
+#define GT_BASE 0xF8F00200u
+#define GT_HZ   333333343ull
+static uint64_t now(void) {
+    if (!(Xil_In32(GT_BASE + 8) & 1u)) Xil_Out32(GT_BASE + 8, 1u);
+    uint32_t hi, lo;
+    do { hi = Xil_In32(GT_BASE + 4); lo = Xil_In32(GT_BASE); } while (hi != Xil_In32(GT_BASE + 4));
+    return ((uint64_t)hi << 32) | lo;
+}
+static uint32_t ms_since(uint64_t t0) { return (uint32_t)((now() - t0) * 1000ull / GT_HZ); }
 
 static void print_fixed(const char *tag, float v) {   /* xil_printf has no %f */
     int32_t i = (int32_t)(v * 10000.0f);
@@ -232,9 +249,14 @@ static int forward(int token, int want_logits) {
     /* LM head: int8 engine, argmax of acc * row_scale (the 1/s factor is common) */
     rms_norm(hbuf, xres, (const float *)IMG(H->output_norm_off), E);
     quantize(hbuf, E);
-    uint32_t cyc = gemv_run(GEMV_INT8, head, xq, ybuf, (int)H->vocab, E);
-    if (!cyc) xil_printf("# ERROR engine (head)\r\n");
-    pl_cycles += cyc;
+    /* Split the vocab so the four unit slices start 8 KB apart (mod 32 KB): if they
+       start a multiple of 32 KB apart they hit the same DDR bank and bandwidth halves
+       (measured 2.25 vs 4.05 GB/s). 4 x 32016 rows, then the remaining rows. */
+    const int n1 = 4 * 32016;
+    uint32_t cyc = gemv_run(GEMV_INT8, head, xq, ybuf, n1, E);
+    uint32_t cyc2 = gemv_run(GEMV_INT8, head + (uint32_t)n1 * E, xq, ybuf + n1, (int)H->vocab - n1, E);
+    if (!cyc || !cyc2) xil_printf("# ERROR engine (head)\r\n");
+    pl_cycles += cyc + cyc2;
     int best = 0;
     float bv = -INFINITY;
     for (uint32_t r = 0; r < H->vocab; r++) {
@@ -251,8 +273,38 @@ static int load_image(void) {
     FIL f;
     UINT got;
     uint64_t t0 = now();
-    if (f_mount(&fatfs, "0:/", 1) != FR_OK) { xil_printf("# ERROR: no SD card / filesystem\r\n"); return -1; }
-    if (f_open(&f, "0:/BITNET.BIN", FA_READ) != FR_OK) { xil_printf("# ERROR: BITNET.BIN not found on SD\r\n"); return -1; }
+    FRESULT fr = f_mount(&fatfs, "0:/", 1);
+    if (fr != FR_OK) { xil_printf("# ERROR: SD mount failed (FRESULT %d)\r\n", fr); return -1; }
+    fr = f_open(&f, "0:/BITNET.BIN", FA_READ);
+    if (fr != FR_OK) {
+        xil_printf("# ERROR: open BITNET.BIN failed (FRESULT %d)\r\n", fr);
+        xil_printf("# fs_type %d csize %d n_fats %d n_fatent %u fsize %u\r\n", fatfs.fs_type,
+                   fatfs.csize, fatfs.n_fats, (uint32_t)fatfs.n_fatent, (uint32_t)fatfs.fsize);
+        xil_printf("# volbase %u fatbase %u dirbase %u database %u\r\n", (uint32_t)fatfs.volbase,
+                   (uint32_t)fatfs.fatbase, (uint32_t)fatfs.dirbase, (uint32_t)fatfs.database);
+        static uint8_t sec[512] __attribute__((aligned(64)));
+        uint32_t lba = (uint32_t)fatfs.database + ((uint32_t)fatfs.dirbase - 2u) * fatfs.csize;
+        /* known contents: 1 = FSInfo "RRaA", 6 = backup boot sector, fatbase = F8 FF FF 0F */
+        const uint32_t probe[] = {1u, 7u, 31u, 32u, 33u, 7648u, 15264u, 0u, 7u, 1u};
+        for (unsigned pass = 0; pass < sizeof probe / sizeof probe[0]; pass++) {
+            uint32_t s = probe[pass], nz = 0, sum = 0;
+            memset(sec, 0xEE, sizeof sec);
+            DRESULT dr = disk_read(0, sec, s, 1);
+            for (int i = 0; i < 512; i++) { nz += sec[i] != 0; sum += sec[i]; }
+            xil_printf("# sector %5u dr %d nonzero %3u sum %6u first:", s, dr, nz, sum);
+            for (int i = 0; i < 8; i++) xil_printf(" %02x", sec[i]);
+            xil_printf("\r\n");
+        }
+        xil_printf("# root directory listing:\r\n");
+        DIR d;
+        FILINFO fi;
+        if (f_opendir(&d, "0:/") == FR_OK) {
+            while (f_readdir(&d, &fi) == FR_OK && fi.fname[0])
+                xil_printf("#   '%s' %u bytes\r\n", fi.fname, (uint32_t)fi.fsize);
+            f_closedir(&d);
+        }
+        return -1;
+    }
     uint32_t size = (uint32_t)f_size(&f);
     if (size > IMG_MAX) { xil_printf("# ERROR: image too big (%u)\r\n", size); return -1; }
     xil_printf("# loading BITNET.BIN: %u MB\r\n", size >> 20);
@@ -340,8 +392,8 @@ static void cmd_generate(const char *s) {
     }
     uint32_t decode_ms = ms_since(t0);
     xil_printf("E %d %u %d %u\r\n", n, prefill_ms, gen, decode_ms);
-    xil_printf("# PL busy: prefill %u ms, decode %u ms\r\n", prefill_pl / (GEMV_MHZ * 1000u),
-               pl_cycles / (GEMV_MHZ * 1000u));
+    xil_printf("# PL busy: prefill %u ms, decode %u ms\r\n", (uint32_t)((uint64_t)prefill_pl / GEMV_KHZ),
+               (uint32_t)((uint64_t)pl_cycles / GEMV_KHZ));
 }
 
 int main(void) {

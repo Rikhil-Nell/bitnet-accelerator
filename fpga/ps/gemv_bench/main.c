@@ -14,7 +14,6 @@
 #include "xil_io.h"
 #include "xil_cache.h"
 #include "xil_printf.h"
-#include "xiltimer.h"
 
 #define GEMV_BASE   0x43C00000u
 #define R_CTRL      0x00u
@@ -28,7 +27,8 @@
 #define R_W(u)      (0x20u + 8u * (u))
 #define R_Y(u)      (0x24u + 8u * (u))
 #define NU          4
-#define PL_MHZ      150u          /* FCLK0 requested in build_bd.tcl */
+/* Actual FCLK0: 1000 MHz IO PLL / 7 (150 was requested; PCW_ACT_FPGA0_PERIPHERAL_FREQMHZ). */
+#define PL_KHZ      142857u
 #define BUF_BASE    0x10000000u   /* test buffers live above the program */
 #define BUF_END     0x3F000000u
 
@@ -47,8 +47,17 @@ static uint32_t alloc(uint32_t bytes) {
     return a;
 }
 
-static uint64_t now(void) { XTime t; XTime_GetTime(&t); return t; }
-static uint32_t us_since(uint64_t t0) { return (uint32_t)((now() - t0) * 1000000ull / (uint64_t)(COUNTS_PER_SECOND)); }
+/* ARM global timer (CPU clock / 2), read directly: the 2026 BSP's XTime path reads 0. */
+#define GT_BASE 0xF8F00200u
+#define GT_HZ   333333343ull
+static uint64_t now(void) {
+    if (!(Xil_In32(GT_BASE + 8) & 1u)) Xil_Out32(GT_BASE + 8, 1u);
+    uint32_t hi, lo;
+    do { hi = Xil_In32(GT_BASE + 4); lo = Xil_In32(GT_BASE); } while (hi != Xil_In32(GT_BASE + 4));
+    return ((uint64_t)hi << 32) | lo;
+}
+static uint32_t us_since(uint64_t t0) { return (uint32_t)((now() - t0) * 1000000ull / GT_HZ); }
+static uint32_t pl_us(uint32_t cycles) { return (uint32_t)((uint64_t)cycles * 1000u / PL_KHZ); }
 
 typedef struct {
     int mode, k, n;               /* n = total rows, split over NU units */
@@ -148,7 +157,7 @@ static uint32_t bytes_streamed(const cmd_t *c) {
 
 /* MB/s from bytes and PL cycles (integer math, xil_printf has no %f). */
 static uint32_t mbps(uint32_t bytes, uint32_t cycles) {
-    return cycles ? (uint32_t)((uint64_t)bytes * PL_MHZ / cycles) : 0;
+    return cycles ? (uint32_t)((uint64_t)bytes * PL_KHZ / 1000u / cycles) : 0;
 }
 
 /* ---------------- tests ---------------- */
@@ -180,28 +189,38 @@ static int correctness(void) {
         uint32_t macs_m = (uint32_t)((uint64_t)c.k * (uint32_t)c.n / 1000000u);
         xil_printf("  %s K=%4d N=%5d: %s  PL %5u us (%4u MB/s)  A9 reference %7u us for %u M MACs\r\n",
                    c.mode ? "int8   " : "ternary", c.k, c.n, errs == 0 ? "PASS" : "FAIL",
-                   cyc / PL_MHZ, mbps(bytes_streamed(&c), cyc), ref_us, macs_m);
+                   pl_us(cyc), mbps(bytes_streamed(&c), cyc), ref_us, macs_m);
         if (errs) fails++;
         heap = mark;
     }
     return fails;
 }
 
-static void bandwidth(void) {
-    xil_printf("\r\n[2] bandwidth: 64 MB ternary matrix, 4 HP ports\r\n");
+/* Stream one ternary matrix of `rows_per_unit` x 2560 per unit. When the four unit
+   slices start a multiple of 32 KB apart they can land in the same DDR bank. */
+static void bw_run(uint32_t rows_per_unit, const char *note) {
     uint32_t mark = heap;
     cmd_t c;
-    layout(&c, 0, 2560, 102400, 0);     /* 102400 x 2560 trits = 65.5 MB */
+    layout(&c, 0, 2560, 4 * (int)rows_per_unit, 0);
     fill_x(c.x, c.k);
-    /* content does not matter for timing; leave DDR as it is */
-    for (int i = 0; i < 3; i++) {
-        uint64_t t0 = now();
-        uint32_t cyc = run(&c);
-        uint32_t wall = us_since(t0);
-        xil_printf("  run %d: %u bytes in %u PL cycles = %u MB/s (wall %u us)\r\n",
-                   i, bytes_streamed(&c), cyc, mbps(bytes_streamed(&c), cyc), wall);
-    }
+    /* contiguous slices, like the packed image (layout() 4K-aligns each slice) */
+    uint32_t slice = rows_per_unit * 640u;
+    for (int u = 0; u < NU; u++) c.w[u] = c.w[0] + (uint32_t)u * slice;
+    uint64_t t0 = now();
+    uint32_t cyc = run(&c);
+    uint32_t wall = us_since(t0);
+    xil_printf("  rows/unit %5u (slice mod 32K = %5u): %u MB/s PL, wall %u us %s\r\n", rows_per_unit,
+               slice % 32768u, mbps(bytes_streamed(&c), cyc), wall, note);
     heap = mark;
+}
+
+static void bandwidth(void) {
+    xil_printf("\r\n[2] bandwidth vs unit-slice offset (64 MB ternary, 4 HP ports)\r\n");
+    bw_run(25600, "(offsets 0 mod 32K)");
+    bw_run(25664, "(8K apart)");
+    bw_run(25632, "(20K apart)");
+    bw_run(25616, "(10K apart)");
+    bw_run(25728, "(16K apart)");
 }
 
 static void token(void) {
@@ -233,14 +252,26 @@ static void token(void) {
     t0 = now();
     uint32_t cyc_head = run(&head);
     uint32_t wall_head = us_since(t0);
+    /* split: 4 x 32016 rows (slices 8 KB apart mod 32 KB) + 4 x 48 rows */
+    cmd_t h1 = head, h2 = head;
+    h1.n = 128064; h2.n = 192;
+    for (int u = 0; u < NU; u++) {
+        h1.w[u] = head.w[0] + (uint32_t)u * 32016u * 2560u;
+        h2.w[u] = head.w[0] + 128064u * 2560u + (uint32_t)u * 48u * 2560u;
+    }
+    t0 = now();
+    uint32_t cyc_split = run(&h1);
+    cyc_split += run(&h2);
+    uint32_t wall_split = us_since(t0);
+    xil_printf("  LM head one command : %u us wall (%u us PL)\r\n", wall_head, pl_us(cyc_head));
+    xil_printf("  LM head split rows  : %u us wall (%u us PL)\r\n", wall_split, pl_us(cyc_split));
+    if (wall_split < wall_head) wall_head = wall_split;
 
     static const char *names[4] = {"qkv    ", "o      ", "gate_up", "down   "};
     for (int i = 0; i < 4; i++)
-        xil_printf("  %s x30: %6u us\r\n", names[i], cyc_layer[i] / PL_MHZ);
+        xil_printf("  %s x30: %6u us\r\n", names[i], pl_us(cyc_layer[i]));
     xil_printf("  30 layers: %u us wall, %u MB/s\r\n", wall_layers,
                (uint32_t)((uint64_t)bytes_layers / (wall_layers ? wall_layers : 1)));
-    xil_printf("  LM head  : %u us wall (%u us PL), %u MB/s\r\n", wall_head, cyc_head / PL_MHZ,
-               mbps(bytes_streamed(&head), cyc_head));
     uint32_t total = wall_layers + wall_head;
     xil_printf("  => matrix work per token: %u ms -> ceiling %u.%02u tok/s (before attention/norms)\r\n",
                total / 1000u, 1000000u / total, (100000000u / total) % 100u);

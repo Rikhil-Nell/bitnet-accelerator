@@ -18,5 +18,18 @@ set BITNET_PS_APP=$App
 cd /d "$Root"
 vitis -s "$Script"
 "@ | Set-Content -Encoding ASCII $bat
+# vitis.dispose() leaves the Vitis Java server alive and it keeps the workspace
+# locked, so stop it before and after each run. Its path is reported with forward
+# slashes ("D:/Xilinx/..."), hence the regex. hw_server (JTAG) is left alone.
+# make may launch the 32-bit PowerShell, where Get-Process cannot read a 64-bit
+# process's Path, so use WMI, which can.
+function Stop-VitisServer {
+    Get-CimInstance Win32_Process -Filter "Name = 'java.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.ExecutablePath -match '^D:[\\/]Xilinx[\\/]' } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+}
+Stop-VitisServer
 cmd /c $bat
-exit $LASTEXITCODE
+$rc = $LASTEXITCODE
+Stop-VitisServer
+exit $rc
