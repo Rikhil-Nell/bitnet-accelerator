@@ -1,0 +1,30 @@
+
+==== gemv_bench ====
+engine version 47454D31 (GEM1)
+
+[1] correctness vs A9 reference
+  ternary K=2560 N= 3840: PASS  PL   611 us (4057 MB/s)  A9 reference  300764 us for 9 M MACs
+  ternary K=2560 N= 2560: PASS  PL   423 us (3914 MB/s)  A9 reference  200553 us for 6 M MACs
+  ternary K=6912 N= 2560: PASS  PL  1095 us (4072 MB/s)  A9 reference  541652 us for 17 M MACs
+  ternary K=2560 N=13824: PASS  PL  2275 us (3917 MB/s)  A9 reference 1082796 us for 35 M MACs
+  int8    K=2560 N= 1024: PASS  PL  1177 us (2237 MB/s)  A9 reference    6029 us for 2 M MACs
+
+[2] bandwidth vs unit-slice offset (64 MB ternary, 4 HP ports)
+  rows/unit 25600 (slice mod 32K =     0): 2249 MB/s PL, wall 29938 us (offsets 0 mod 32K)
+  rows/unit 25664 (slice mod 32K =  8192): 4048 MB/s PL, wall 16957 us (8K apart)
+  rows/unit 25632 (slice mod 32K = 20480): 4053 MB/s PL, wall 16915 us (20K apart)
+  rows/unit 25616 (slice mod 32K = 10240): 4043 MB/s PL, wall 16948 us (10K apart)
+  rows/unit 25728 (slice mod 32K = 16384): 3923 MB/s PL, wall 17521 us (16K apart)
+
+[3] one decode step: 30 x {qkv, o, gate_up, down} + int8 LM head
+  buffers up to 0x24A4E500
+  LM head one command : 147975 us wall (147199 us PL)
+  LM head split rows  : 81553 us wall (80771 us PL)
+  qkv     x30:  18376 us
+  o       x30:  12827 us
+  gate_up x30:  68353 us
+  down    x30:  32878 us
+  30 layers: 137489 us wall, 3822 MB/s
+  => matrix work per token: 219 ms -> ceiling 4.56 tok/s (before attention/norms)
+
+BENCH PASS

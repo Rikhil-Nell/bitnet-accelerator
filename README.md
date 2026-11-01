@@ -2,7 +2,11 @@
 
 Running Microsoft's **BitNet b1.58 2B-4T** on a Digilent Zybo Z7-10 (Zynq-7010,
 1 GB DDR3L), with the ternary matrix work in the FPGA fabric and everything else
-on the ARM cores. Target: **≥ 2 tokens/s**.
+on the ARM cores. Target was **≥ 2 tokens/s**; it runs at **3.1–3.4 tokens/s**
+(`docs/results/board-v1/`).
+
+Quick start: SD card with `BITNET.BIN` (from `make pack`) in the board, then
+`make board` and `make chat`.
 
 Design and reasoning: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 Where things stand: [`STATUS.md`](STATUS.md).

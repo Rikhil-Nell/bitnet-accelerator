@@ -1,0 +1,20 @@
+
+# bitnet_zybo: BitNet b1.58 2B-4T on Zybo Z7-10
+# SD 1:/: FRESULT 0 (BITNET.BIN found)
+# loading BITNET.BIN: 812 MB
+#   64 MB (3 s)
+#   128 MB (6 s)
+#   192 MB (9 s)
+#   256 MB (13 s)
+#   320 MB (16 s)
+#   384 MB (19 s)
+#   448 MB (23 s)
+#   512 MB (26 s)
+#   576 MB (29 s)
+#   640 MB (32 s)
+#   704 MB (36 s)
+#   768 MB (39 s)
+# loaded in 41 s (20 MB/s)
+# checksum 36BD6135 (expect 36BD6135) OK, 1369 ms
+# model: 30 layers, vocab 128256, ctx 512
+READY

@@ -84,7 +84,8 @@ def main() -> int:
         dom = platform.get_domain("standalone_domain")
         dom.set_lib("xilffs")
         for key, val in (("XILFFS_enable_exfat", "true"), ("XILFFS_read_only", "true"),
-                         ("XILFFS_use_mkfs", "false")):
+                         ("XILFFS_use_mkfs", "false"),
+                         ("XILFFS_enable_multi_partition", "true")):
             dom.set_config("lib", key, val, "xilffs")
         status = platform.build()
         if status:

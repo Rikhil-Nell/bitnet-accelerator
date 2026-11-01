@@ -24,7 +24,7 @@
 #endif
 #include "ff.h"
 #include "diskio.h"
-_Static_assert(FF_FS_EXFAT == 1 && FF_USE_LFN != 0 && FF_FS_READONLY == 1,
+_Static_assert(FF_FS_EXFAT == 1 && FF_USE_LFN != 0 && FF_FS_READONLY == 1 && FF_MULTI_PARTITION == 1,
                "FatFs config differs from the xilffs library build");
 #include "xil_cache.h"
 #include "xil_printf.h"
@@ -273,36 +273,24 @@ static int load_image(void) {
     FIL f;
     UINT got;
     uint64_t t0 = now();
-    FRESULT fr = f_mount(&fatfs, "0:/", 1);
-    if (fr != FR_OK) { xil_printf("# ERROR: SD mount failed (FRESULT %d)\r\n", fr); return -1; }
-    fr = f_open(&f, "0:/BITNET.BIN", FA_READ);
+    /* Logical drive "1:" = SD partition 1, "0:" = auto (superfloppy or first partition)
+       (VolToPart in xilffs ff.c). Try the partition first: a card can carry a stale
+       whole-disk boot sector at LBA 0 *and* a partition table pointing at the real
+       volume (this one does: partition 1 at LBA 16). Windows uses the partition;
+       FatFs auto-detect would pick the stale boot sector and see an empty disk. */
+    static const char *const vol[2]  = {"1:/", "0:/"};
+    static const char *const path[2] = {"1:/BITNET.BIN", "0:/BITNET.BIN"};
+    FRESULT fr = FR_NO_FILE;
+    int v;
+    for (v = 0; v < 2; v++) {
+        fr = f_mount(&fatfs, vol[v], 1);
+        if (fr == FR_OK) fr = f_open(&f, path[v], FA_READ);
+        xil_printf("# SD %s: FRESULT %d%s\r\n", vol[v], fr, fr == FR_OK ? " (BITNET.BIN found)" : "");
+        if (fr == FR_OK) break;
+        f_mount(0, vol[v], 0);
+    }
     if (fr != FR_OK) {
-        xil_printf("# ERROR: open BITNET.BIN failed (FRESULT %d)\r\n", fr);
-        xil_printf("# fs_type %d csize %d n_fats %d n_fatent %u fsize %u\r\n", fatfs.fs_type,
-                   fatfs.csize, fatfs.n_fats, (uint32_t)fatfs.n_fatent, (uint32_t)fatfs.fsize);
-        xil_printf("# volbase %u fatbase %u dirbase %u database %u\r\n", (uint32_t)fatfs.volbase,
-                   (uint32_t)fatfs.fatbase, (uint32_t)fatfs.dirbase, (uint32_t)fatfs.database);
-        static uint8_t sec[512] __attribute__((aligned(64)));
-        uint32_t lba = (uint32_t)fatfs.database + ((uint32_t)fatfs.dirbase - 2u) * fatfs.csize;
-        /* known contents: 1 = FSInfo "RRaA", 6 = backup boot sector, fatbase = F8 FF FF 0F */
-        const uint32_t probe[] = {1u, 7u, 31u, 32u, 33u, 7648u, 15264u, 0u, 7u, 1u};
-        for (unsigned pass = 0; pass < sizeof probe / sizeof probe[0]; pass++) {
-            uint32_t s = probe[pass], nz = 0, sum = 0;
-            memset(sec, 0xEE, sizeof sec);
-            DRESULT dr = disk_read(0, sec, s, 1);
-            for (int i = 0; i < 512; i++) { nz += sec[i] != 0; sum += sec[i]; }
-            xil_printf("# sector %5u dr %d nonzero %3u sum %6u first:", s, dr, nz, sum);
-            for (int i = 0; i < 8; i++) xil_printf(" %02x", sec[i]);
-            xil_printf("\r\n");
-        }
-        xil_printf("# root directory listing:\r\n");
-        DIR d;
-        FILINFO fi;
-        if (f_opendir(&d, "0:/") == FR_OK) {
-            while (f_readdir(&d, &fi) == FR_OK && fi.fname[0])
-                xil_printf("#   '%s' %u bytes\r\n", fi.fname, (uint32_t)fi.fsize);
-            f_closedir(&d);
-        }
+        xil_printf("# ERROR: BITNET.BIN not found on the SD card (copy it to the card's root)\r\n");
         return -1;
     }
     uint32_t size = (uint32_t)f_size(&f);
