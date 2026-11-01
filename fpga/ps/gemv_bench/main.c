@@ -211,6 +211,57 @@ static int correctness(void) {
 
 /* While a large command runs, every row that PROGRESS reports as done must already
    hold its final value in DDR (the firmware overlaps its work on that guarantee). */
+/* GEM3: two activation vectors per weight pass (NB = 1). Output word per row =
+   {y_b, y_a}; both checked against the A9. Also times NB=2 vs NB=1 on the same matrix. */
+static int batch2(void) {
+    xil_printf("\r\n[2b] two activation vectors per pass (speculative verification)\r\n");
+    static const int shapes[][2] = {{2560, 3840}, {6912, 2560}, {2560, 13824}};
+    int fails = 0;
+    for (unsigned s = 0; s < 3; s++) {
+        uint32_t mark = heap;
+        cmd_t c;
+        layout(&c, 0, shapes[s][0], shapes[s][1], 0);
+        int kp = t5_k(c.k), r = c.n / NU;
+        uint32_t x2 = alloc(2u * (uint32_t)kp);       /* x_a then x_b, each kp bytes */
+        fill_x(x2, c.k);
+        fill_x(x2 + (uint32_t)kp, c.k);
+        c.x = x2;
+        for (int u = 0; u < NU; u++) {
+            fill_random(c.w[u], row_bytes_of(0, c.k) * (uint32_t)r, 1);
+            c.y[u] = alloc(8u * (uint32_t)r);
+            memset((void *)c.y[u], 0xA5, 8u * (uint32_t)r);
+            Xil_DCacheFlushRange(c.y[u], 8u * (uint32_t)r);
+        }
+        Xil_DCacheFlushRange(x2, 2u * (uint32_t)kp);
+        csr_w(0x54u, 1u);
+        uint32_t cyc2 = run(&c);
+        csr_w(0x54u, 0u);
+        int errs = cyc2 ? 0 : 1;
+        for (int u = 0; u < NU && cyc2; u++) {
+            Xil_DCacheInvalidateRange(c.y[u], 8u * (uint32_t)r);
+            const int32_t *y = (const int32_t *)c.y[u];
+            for (int i = 0; i < r; i += 3) {
+                c.x = x2;
+                int32_t ea = ref_row(&c, u, i);
+                c.x = x2 + (uint32_t)kp;
+                int32_t eb = ref_row(&c, u, i);
+                c.x = x2;
+                if (y[2 * i] != ea || y[2 * i + 1] != eb) {
+                    if (errs < 5) xil_printf("  MISMATCH unit %d row %d: got %d,%d exp %d,%d\r\n", u, i, y[2 * i], y[2 * i + 1], ea, eb);
+                    errs++;
+                }
+            }
+        }
+        for (int u = 0; u < NU; u++) c.y[u] = alloc(4u * (uint32_t)r);
+        uint32_t cyc1 = run(&c);
+        xil_printf("  T5 K=%4d N=%5d x2: %s  PL %5u us for two vectors, %5u us for one\r\n", c.k, c.n,
+                   errs ? "FAIL" : "PASS", pl_us(cyc2), pl_us(cyc1));
+        fails += errs != 0;
+        heap = mark;
+    }
+    return fails;
+}
+
 static int progress(void) {
     xil_printf("\r\n[2] progress counters during a run (gate_up shape)\r\n");
     uint32_t mark = heap;
@@ -331,10 +382,12 @@ static void token(void) {
 int main(void) {
     xil_printf("\r\n==== gemv_bench ====\r\n");
     uint32_t ver = csr_r(R_VERSION);
-    xil_printf("engine version %08x %s\r\n", ver, ver == 0x47454D32u ? "(GEM2)" : "(UNEXPECTED)");
-    if (ver != 0x47454D32u) { xil_printf("BENCH FAIL\r\n"); return 1; }
+    int v3 = ver == 0x47454D33u;
+    xil_printf("engine version %08x %s\r\n", ver, ver == 0x47454D32u ? "(GEM2)" : v3 ? "(GEM3)" : "(UNEXPECTED)");
+    if (ver != 0x47454D32u && !v3) { xil_printf("BENCH FAIL\r\n"); return 1; }
     int fails = correctness();
     fails += progress();
+    if (v3) fails += batch2();
     bandwidth();
     token();
     xil_printf("\r\n%s\r\n", fails ? "BENCH FAIL" : "BENCH PASS");

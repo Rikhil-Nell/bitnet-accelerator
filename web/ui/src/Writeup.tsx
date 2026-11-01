@@ -122,6 +122,32 @@ function Milestones() {
   );
 }
 
+function SpecFig() {
+  const box = (x: number, y: number, w: number, t: string, s: string, c = "var(--line)") => (
+    <g>
+      <rect x={x} y={y} width={w} height="46" rx="8" fill="var(--surface-2)" stroke={c} />
+      <text x={x + w / 2} y={y + 20} text-anchor="middle" font-size="13" font-weight="600">{t}</text>
+      <text x={x + w / 2} y={y + 37} text-anchor="middle" font-size="11.5" class="muted">{s}</text>
+    </g>
+  );
+  return (
+    <svg viewBox="0 0 820 200" role="img" aria-label="Speculative decoding with two positions per pass">
+      {box(10, 20, 150, '"capital"', "current token")}
+      {box(10, 100, 150, '"of"', "guess (n-gram table)", "var(--accent-2)")}
+      <rect x="200" y="14" width="300" height="140" rx="12" fill="color-mix(in srgb, var(--accent) 10%, transparent)" stroke="var(--accent)" />
+      <text x="350" y="40" text-anchor="middle" font-weight="700">one pass over 490 MB</text>
+      <text x="350" y="62" text-anchor="middle" font-size="12" class="muted">every weight beat is multiplied</text>
+      <text x="350" y="78" text-anchor="middle" font-size="12" class="muted">with both activation vectors</text>
+      <text x="350" y="112" text-anchor="middle" font-size="12">position 2 attends to position 1</text>
+      <path d="M160 43 L200 60 M160 123 L200 105" stroke="var(--muted)" fill="none" />
+      {box(540, 20, 270, 'predicts "of"  ✓ = the guess', "so the 2nd output is valid too", "var(--accent-3)")}
+      {box(540, 100, 270, 'predicts "France"', "2 tokens from 1 pass", "var(--accent-3)")}
+      <path d="M500 50 L540 43 M500 110 L540 123" stroke="var(--muted)" fill="none" />
+      <text x="410" y="190" text-anchor="middle" class="muted" font-size="12">if the first prediction differs from the guess, the second output is discarded: never a wrong answer, only wasted work</text>
+    </svg>
+  );
+}
+
 function ProfileBars() {
   const entries = Object.entries(profile).sort((a, b) => b[1] - a[1]);
   const total = entries.reduce((s, [, v]) => s + v, 0);
@@ -269,12 +295,33 @@ export default function Writeup() {
         conversation, since every new token looks back at all previous ones.
       </p>
 
-      <h2>7. How far can it go?</h2>
+      <h2>7. Two tokens per pass: speculative decoding</h2>
       <p>
-        With the whole model streamed at 100 % of peak and zero ARM time, 490 MB per token caps a single stream at
-        about 8.7 tokens/s. Past that, the only lever is to get more than one token per pass over the weights:
-        guess the next few tokens cheaply, and verify all guesses in one pass. That is <em>speculative
-        decoding</em>, and it is where the remaining speed comes from.
+        Once the engine runs at the memory limit, a single stream of tokens cannot go faster than one pass over
+        490 MB of weights per token: about 8.3 passes per second. The only lever left is to get <em>more than one
+        token out of each pass</em>.
+      </p>
+      <p>
+        The engine's third version multiplies every weight it reads with <b>two</b> activation vectors instead
+        of one: a second 40-lane adder tree per unit, fed by the same decoded weights, costing extra logic but no
+        extra memory bandwidth. We feed it the current token and a <em>guess</em> for the token after it. The model
+        computes its real prediction for both positions in the same pass. If the real prediction equals the
+        guess, both outputs are valid and the pass produced two tokens. If not, we keep the first and throw the
+        second away. The output is exactly what the model would have produced one token at a time.
+      </p>
+      <figure class="figure wide"><SpecFig /><figcaption>One pass, two positions. The guess only has to be right often enough to pay for the extra ARM work of the second position.</figcaption></figure>
+      <p>
+        The guesses come from two cheap sources: the conversation itself ("the token that followed these two
+        tokens earlier"), and a table of the model's own habits, built by letting the model answer a few thousand
+        questions on a GPU and recording which token most often follows each short sequence. On questions the
+        table never saw, about one pass in five produces two tokens.
+      </p>
+
+      <h2>8. How far can it go?</h2>
+      <p>
+        The DDR sets a hard floor: about 121 ms to stream the weights once. Everything else is either hidden
+        behind that stream (epilogues, the vocabulary ranking) or split across both ARM cores (attention).
+        What is left is the speculation hit rate, which grows slowly with more drafting data.
       </p>
       <p><a href="#/demo">Try it live →</a></p>
     </article>

@@ -4,7 +4,7 @@
 Writes into the output directory:
   mem.hex    initial memory image ($readmemh, 64-bit words, @word-address lines)
   exp.hex    expected memory image for the y regions
-  cases.txt  one line per command: mode x_beats row_beats N x_addr w0..w3 y0..y3
+  cases.txt  one line per command: mode nb x_beats row_beats N x_addr w0..w3 y0..y3
 """
 
 from __future__ import annotations
@@ -22,16 +22,19 @@ from engine_format import (NU, align, gemv, pack_int8, pack_t5, t5_k,  # noqa: E
 BASE = 0x0010_0000
 MEM_BYTES = 4 << 20   # must match MEM_WORDS in the testbench
 
-# (mode, K, N): mode 0 = T5 ternary, 1 = int8. Corner cases plus the model's real K.
+# (mode, K, N, nb): mode 0 = T5 ternary, 1 = int8; nb = activation vectors (2: T5 only).
 CASES = [
-    (0, 80, 8),        # 2 T5 beats per row, 2 rows per unit
-    (0, 40, 64),       # 1 beat per row: back-to-back row completions
-    (0, 64, 8),        # K not a multiple of 40: zero padding to 80
-    (0, 2560, 40),     # model K (attn / gate / up)
-    (0, 6912, 16),     # model K (ffn_down): padded to 6920, deepest activation use
-    (1, 256, 24),      # int8
-    (1, 2560, 8),      # int8 at model K (exact-head mode)
-    (0, 2560, 8),      # back-to-back command reusing the engine
+    (0, 80, 8, 1),        # 2 T5 beats per row, 2 rows per unit
+    (0, 40, 64, 1),       # 1 beat per row: back-to-back row completions
+    (0, 64, 8, 1),        # K not a multiple of 40: zero padding to 80
+    (0, 2560, 40, 1),     # model K (attn / gate / up)
+    (0, 6912, 16, 1),     # model K (ffn_down): padded to 6920, deepest activation use
+    (1, 256, 24, 1),      # int8
+    (1, 2560, 8, 1),      # int8 at model K (exact-head mode)
+    (0, 2560, 8, 2),      # two vectors (speculative verification)
+    (0, 40, 64, 2),       # two vectors, 1 beat per row: one output word per clock-ish
+    (0, 6912, 16, 2),     # two vectors at the deepest K
+    (0, 2560, 8, 1),      # back to one vector
 ]
 
 
@@ -52,9 +55,10 @@ def main() -> int:
         for i, w in enumerate(words.tolist()):
             into[(addr >> 3) + i] = int(w)
 
-    for mode, k, n in CASES:
+    for mode, k, n, nb in CASES:
         assert n % (2 * NU) == 0
         x = rng.integers(-128, 128, size=k, dtype=np.int64).astype(np.int8)
+        x2 = rng.integers(-128, 128, size=k, dtype=np.int64).astype(np.int8)
         x[0], x[-1] = -128, 127   # extremes
         if mode == 0:
             w = rng.choice(np.array([-1, 0, 1], dtype=np.int8), size=(n, k), p=[0.3, 0.4, 0.3])
@@ -62,15 +66,18 @@ def main() -> int:
             w = rng.integers(-128, 128, size=(n, k), dtype=np.int64).astype(np.int8)
             w[0, :] = -128        # worst-case magnitude row
         y = gemv(w, x)
+        y2 = gemv(w, x2)
 
         kp = t5_k(k) if mode == 0 else k
         xb = kp // 8
         rb = kp // 40 if mode == 0 else k // 8
-        xpad = np.zeros(kp, dtype=np.int8)
+        xpad = np.zeros(kp * nb, dtype=np.int8)
         xpad[:k] = x
+        if nb == 2:
+            xpad[kp : kp + k] = x2
         x_addr = ptr = align(ptr, 128)
         put(np.frombuffer(xpad.tobytes(), dtype="<u8"), x_addr, mem)
-        ptr += kp
+        ptr += kp * nb
         w_addrs, y_addrs = [], []
         for sl in unit_slices(n):
             ptr = align(ptr)
@@ -82,12 +89,13 @@ def main() -> int:
         for sl in unit_slices(n):
             ptr = align(ptr)
             y_addrs.append(ptr)
-            yw = np.frombuffer(y[sl].astype("<i4").tobytes(), dtype="<u8")
+            ys = y[sl] if nb == 1 else np.stack([y[sl], y2[sl]], axis=1).reshape(-1)   # rows {a, b}
+            yw = np.frombuffer(ys.astype("<i4").tobytes(), dtype="<u8")
             put(yw, ptr, exp)
             # poison the output area so stale data can't pass
             put(np.full(yw.size, 0xDEADBEEFDEADBEEF, dtype=np.uint64), ptr, mem)
             ptr += yw.size * 8
-        lines.append(" ".join(str(v) for v in (mode, xb, rb, n, x_addr, *w_addrs, *y_addrs)))
+        lines.append(" ".join(str(v) for v in (mode, nb, xb, rb, n, x_addr, *w_addrs, *y_addrs)))
         assert len(w_addrs) == NU
 
     if ptr > MEM_BYTES:

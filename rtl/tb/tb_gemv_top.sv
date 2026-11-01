@@ -149,7 +149,7 @@ module tb_gemv_top;
     endtask
 
     // ---------------- test sequence ----------------
-    int fd, mode, xb, rb, n, ncase = 0, errors = 0;
+    int fd, mode, nb, xb, rb, n, words, ncase = 0, errors = 0;
     int unsigned xa, wa[NU], ya[NU];
     reg [31:0] st, cyc, ver, prog;
     string vdir;
@@ -166,12 +166,14 @@ module tb_gemv_top;
         repeat (5) @(posedge clk);
 
         csr_read(12'h1C, ver);
-        if (ver !== 32'h47454D32) begin $display("FAIL: VERSION %h", ver); $finish; end
+        if (ver !== 32'h47454D33) begin $display("FAIL: VERSION %h", ver); $finish; end
 
         fd = $fopen({vdir, "/cases.txt"}, "r");
-        while ($fscanf(fd, "%d %d %d %d %d %d %d %d %d %d %d %d %d\n", mode, xb, rb, n, xa,
-                       wa[0], wa[1], wa[2], wa[3], ya[0], ya[1], ya[2], ya[3]) == 13) begin
+        while ($fscanf(fd, "%d %d %d %d %d %d %d %d %d %d %d %d %d %d\n", mode, nb, xb, rb, n, xa,
+                       wa[0], wa[1], wa[2], wa[3], ya[0], ya[1], ya[2], ya[3]) == 14) begin
+            words = nb == 2 ? n / NU : n / NU / 2;   // 64-bit output words per unit
             csr_write(12'h08, mode);
+            csr_write(12'h54, nb == 2);
             csr_write(12'h0C, xb);
             csr_write(12'h50, rb);
             csr_write(12'h10, n / NU);
@@ -187,23 +189,23 @@ module tb_gemv_top;
             // progress = acknowledged write bursts (16 beats = 32 rows each, last may be short)
             for (int u = 0; u < NU; u++) begin
                 csr_read(12'h40 + 4*u, prog);
-                if (prog != (n / NU / 2 + 15) / 16) begin
-                    $display("FAIL: case %0d unit %0d progress %0d, expected %0d", ncase, u, prog, (n / NU / 2 + 15) / 16);
+                if (prog != (words + 15) / 16) begin
+                    $display("FAIL: case %0d unit %0d progress %0d, expected %0d", ncase, u, prog, (words + 15) / 16);
                     errors++;
                 end
             end
             for (int u = 0; u < NU; u++)
-                for (int i = 0; i < n / NU / 2; i++) begin
+                for (int i = 0; i < words; i++) begin
                     int unsigned a = (ya[u] >> 3) + i;
                     if (mem[a] !== exp_mem[a]) begin
                         if (errors < 10)
-                            $display("FAIL: case %0d unit %0d rows %0d,%0d got %h exp %h",
-                                     ncase, u, 2*i, 2*i+1, mem[a], exp_mem[a]);
+                            $display("FAIL: case %0d unit %0d word %0d got %h exp %h",
+                                     ncase, u, i, mem[a], exp_mem[a]);
                         errors++;
                     end
                 end
-            $display("case %0d: mode=%0d x_beats=%0d row_beats=%0d N=%0d cycles=%0d (%0.2f beats/cycle/unit)",
-                     ncase, mode, xb, rb, n, cyc, real'(rb * (n/NU) + xb) / cyc);
+            $display("case %0d: mode=%0d nb=%0d x_beats=%0d row_beats=%0d N=%0d cycles=%0d (%0.2f beats/cycle/unit)",
+                     ncase, mode, nb, xb, rb, n, cyc, real'(rb * (n/NU) + xb * nb) / cyc);
             ncase++;
         end
         $fclose(fd);

@@ -6,6 +6,7 @@
  *   0x20 + 8u  W address of unit u       0x24 + 8u  Y address of unit u
  *   0x40 + 4u  PROGRESS of unit u (write bursts acknowledged: 32 rows each)
  *   0x50 ROW_BEATS (beats per weight row)
+ *   0x54 NB (GEM3: 1 = two activation vectors, x at x and x + 8 * X_BEATS; y = {y_a, y_b} per row)
  */
 #ifndef GEMV_H
 #define GEMV_H
@@ -15,6 +16,7 @@
 
 #define GEMV_BASE    0x43C00000u
 #define GEMV_VERSION 0x47454D32u   /* "GEM2" */
+#define GEMV_VERSION3 0x47454D33u  /* "GEM3": GEM2 + NB register (0x54), two vectors */
 #define GEMV_NU      4
 #define GEMV_KHZ     142857u   /* actual FCLK0: 1000 MHz / 7 */
 

@@ -20,7 +20,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from board_image import parse  # noqa: E402
 from engine import BitNetEngine, EmulatedAccelerator  # noqa: E402
-from engine_format import unpack_ternary  # noqa: E402
+from engine_format import unpack_t5  # noqa: E402
 from generate import HF_DIR, STOP_IDS, chat_prompt  # noqa: E402
 from gguf_model import BitNetModel, Layer, TernaryMatrix  # noqa: E402
 from pack_board import DEFAULT_OUT  # noqa: E402
@@ -35,21 +35,24 @@ def load_image(path: Path, n_layer_limit: int | None = None) -> tuple[BitNetMode
     def f32(off: int, n: int) -> np.ndarray:
         return np.frombuffer(img[off : off + 4 * n].tobytes(), dtype="<f4").copy()
 
-    def tern(off: int, n: int, k: int) -> np.ndarray:
-        words = np.frombuffer(img[off : off + n * k // 4].tobytes(), dtype="<u8")
-        return unpack_ternary(words, n, k)
+    def tern(off: int, n: int, k: int, stride: int) -> np.ndarray:
+        """v2: T5 rows, 4 unit slices at off + u * stride"""
+        rb = (k + 39) // 40 * 8
+        r = n // 4
+        b = np.concatenate([np.asarray(img[off + u * stride : off + u * stride + r * rb]) for u in range(4)])
+        return unpack_t5(b.reshape(n, rb), k)
 
     layers = []
     for i, t in enumerate(table[: n_layer_limit or h.n_layer]):
-        qkv = tern(t["qkv_off"], E + 2 * kv, E)
-        gu = tern(t["gate_up_off"], 2 * F, E)
+        qkv = tern(t["qkv_off"], E + 2 * kv, E, h.ustride_qkv)
+        gu = tern(t["gate_up_off"], 2 * F, E, h.ustride_gate_up)
         L = Layer(f32(t["attn_norm_off"], E), f32(t["attn_sub_norm_off"], E),
                   f32(t["ffn_norm_off"], E), f32(t["ffn_sub_norm_off"], F))
         parts = {
             "attn_q": qkv[:E], "attn_k": qkv[E : E + kv], "attn_v": qkv[E + kv :],
-            "attn_output": tern(t["o_off"], E, E),
+            "attn_output": tern(t["o_off"], E, E, h.ustride_o),
             "ffn_gate": gu[:F], "ffn_up": gu[F:],
-            "ffn_down": tern(t["down_off"], E, F),
+            "ffn_down": tern(t["down_off"], E, F, h.ustride_down),
         }
         scales = [t[s] for s in ("scale_q", "scale_k", "scale_v", "scale_o", "scale_gate", "scale_up", "scale_down")]
         for (name, trits), sc in zip(parts.items(), scales):

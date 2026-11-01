@@ -110,8 +110,11 @@ class GpuBitNet:
         return torch.cat([x1 * cos - x2 * sin, x2 * cos + x1 * sin], -1)
 
     @torch.inference_mode()
-    def generate(self, prompts: list[list[int]], max_new: int = 64, trace=None) -> list[list[int]]:
-        """Greedy, batched, left-padded. trace(step, info) gets per-step tensors if given."""
+    def generate(self, prompts: list[list[int]], max_new: int = 64, trace=None,
+                 temperature: float = 0.0, top_k: int = 40, seed: int = 0) -> list[list[int]]:
+        """Batched, left-padded. Greedy unless temperature > 0 (top-k sampling).
+        trace(step, info) gets per-step tensors if given."""
+        gen = torch.Generator(device=self.dev).manual_seed(seed)
         B = len(prompts)
         P = max(len(p) for p in prompts)
         S = P + max_new
@@ -159,9 +162,14 @@ class GpuBitNet:
                 y, _ = self.bitlinear(a, L["down"])
                 x = x + (y * s["down"]).view(B, T, self.E)
             hl = self.rms(x[:, -1], self.out_norm)
-            hq, _ = self.quant(hl)
-            logits = self.imm(hq, self.head_q.t()).float() * self.head_scale
-            nxt = logits.argmax(-1)
+            hq, sq = self.quant(hl)
+            logits = self.imm(hq, self.head_q.t()).float() * self.head_scale / sq   # real logits
+            if temperature > 0:
+                v, ix = logits.topk(top_k, dim=-1)
+                pr = torch.softmax((v - v[:, :1]) / temperature, dim=-1)
+                nxt = ix.gather(1, torch.multinomial(pr, 1, generator=gen))[:, 0]
+            else:
+                nxt = logits.argmax(-1)
             if trace is not None:
                 trace(step, {"logits": logits, "hq": hq})
             for b in range(B):

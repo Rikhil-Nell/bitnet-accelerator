@@ -35,6 +35,14 @@ if {$apu eq ""} {
   exit 1
 }
 
+# CPU1 may still be running a previous firmware's worker loop out of DDR that is about
+# to be overwritten: halt it first. It is restarted at cpu1_entry below (if the ELF has one).
+set cpu1 [lindex [targets -filter {name =~ "*A9*#1*"}] 0]
+if {$cpu1 ne ""} {
+  targets -set $cpu1
+  catch {stop}
+}
+
 targets -set $apu
 catch {stop}
 # Reset A9 #0 only (PL and DDR untouched): clears a pending abort left by the previous app.
@@ -75,6 +83,16 @@ if {!$skip_elf} {
   dow $elf
   puts "XSDB: continue"
   con
+  # second core: start it at cpu1_entry (cpu1.S), SYS mode, IRQ/FIQ masked, ARM state
+  if {[info exists ::env(BITNET_CPU1_ENTRY)] && $::env(BITNET_CPU1_ENTRY) ne "" && $cpu1 ne ""} {
+    after 200
+    targets -set $cpu1
+    catch {stop}
+    rwr cpsr 0xdf
+    rwr pc $::env(BITNET_CPU1_ENTRY)
+    con
+    puts "XSDB: CPU1 started at $::env(BITNET_CPU1_ENTRY)"
+  }
 } else {
   puts "XSDB: BITNET_ELF=skip (data-only session)"
 }

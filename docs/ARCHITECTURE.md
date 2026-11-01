@@ -1,109 +1,139 @@
 # Architecture: BitNet b1.58 2B-4T on the Zybo Z7-10
 
-Goal: **≥ 2 tokens/s decode**, short context (≤ 512 tokens), everything on the board.
+Everything runs on the board: the FPGA (PL) streams the ternary weights through four
+matrix-vector engines, the two Cortex-A9 cores (PS) do everything else. The PC (or the
+web page, `web/`) only converts text to token ids and back.
 
 ## The one equation
 
-Decoding one token is a matrix-vector product against every weight in the model,
-and each weight is used exactly once. So the board is **memory-bandwidth bound**:
+Generating a token is a matrix-vector product against every weight, and each weight is
+used once. The board is **memory-bandwidth bound**:
 
 ```
-tokens/s ≈ sustained DDR read bandwidth / bytes of weights per token
+tokens/s ≈ sustained DDR read bandwidth / bytes read per token
 ```
 
-Compute is cheap: a ternary weight is an add, a subtract or nothing.
+| Per token | Params | v1 bytes | v2 bytes |
+|---|---|---|---|
+| 30 layers, 7 ternary matrices each | 2.084 B | 521 MB (2 bit) | 424 MB (T5, 1.6 bit + padding/skew) |
+| LM head ranking | 328 M | 328 MB (int8) | 66 MB (T5 coarse copy) + 64 int8 rows |
+| **Total** | | **849 MB** | **490 MB** |
 
-| Per token | Params | Bytes |
-|---|---|---|
-| Ternary BitLinear (7 matrices × 30 layers) | 2.084 B | 521 MB at 2 bit/trit (417 MB at 1.6) |
-| LM head (tied embedding) | 328 M | 328 MB at int8 (657 MB at F16 in the GGUF: does not fit) |
-| **Total streamed** | | **849 MB** (745 MB with 1.6-bit packing) |
-| KV cache (5 KV heads × 128, fp16) | | 77 KB per token of context, *read* per step |
-
-Zybo Z7-10 DDR3L: 32-bit @ 1066 MT/s = 4.26 GB/s peak. At a realistic
-2.5–3.4 GB/s that is **3–4 tok/s ceiling** before PS overheads, so 2 tok/s has margin.
+DDR3L, 32-bit @ 1066 MT/s: 4.27 GB/s peak, **4.05 GB/s measured** (95 %). So one pass
+over the weights takes ≥ 121 ms (8.3 passes/s). Speculative decoding gets more than
+one token out of a pass.
 
 ## Block diagram
 
 ```
-          ┌──────────────── PS (Cortex-A9 ×2, bare-metal) ────────────────┐
-          │ embedding lookup, RMSNorm, act quant, RoPE, attention, softmax,│
-          │ ReLU², residuals, argmax, UART token I/O, SD weight loader     │
-          └──────┬──────────────────────────┬──────────────────────────────┘
-          M_AXI_GP0 (CSRs)          S_AXI_HP0..HP3 (DDR, 64-bit each)
-                 │                ┌─────────┼─────────┬─────────┐
-          ┌──────▼──────┐   ┌─────▼───┐ ┌───▼─────┐ ┌─▼───────┐ ┌▼────────┐
-          │ gemv_csr    │──▶│ unit 0  │ │ unit 1  │ │ unit 2  │ │ unit 3  │
-          │ (AXI-Lite)  │   └─────────┘ └─────────┘ └─────────┘ └─────────┘
-          └─────────────┘   each unit: AXI3 read master → FIFO → act buffer
-                            + 32-lane ternary / 8-lane int8 datapath
-                            → int32 out FIFO → AXI3 write master
+          ┌─────────── PS: Cortex-A9 ×2 (bare-metal, NEON) ───────────┐
+          │ CPU0: control, norms, quantize, RoPE, epilogues, drafting,  │
+          │       top-64 rescoring, UART; attention for KV heads 0-2    │
+          │ CPU1: attention for KV heads 3-4 (cpu1.c, WFE/SEV mailbox)  │
+          └──────┬────────────────────────┬────────────────────────────┘
+          M_AXI_GP0 (CSRs)        S_AXI_HP0..HP3 (DDR, 64-bit AXI3 each)
+                 │              ┌─────────┼─────────┬─────────┐
+          ┌──────▼──────┐  ┌────▼────┐ ┌──▼──────┐ ┌▼────────┐ ┌▼────────┐
+          │ CSRs        │─▶│ unit 0  │ │ unit 1  │ │ unit 2  │ │ unit 3  │
+          │ (AXI-Lite)  │  └─────────┘ └─────────┘ └─────────┘ └─────────┘
+          └─────────────┘  each unit: AXI3 read master → 512-deep FIFO →
+                           T5 decode → 2 × 40-lane adder trees → accumulators
+                           → output FIFO → AXI3 write master (+ progress count)
 ```
 
-* **Four identical units**, one per HP port. A matrix is split into four equal
-  row ranges; unit *u* computes rows `[u·R, (u+1)·R)`. Units never share data,
-  so there is no arbitration and no cross-unit wiring.
-* Per unit, per command: (1) read the int8 activation vector `x` (K bytes) into
-  its own activation buffer, (2) stream its rows of weights and accumulate one
-  row at a time, (3) write one int32 per row to `y`.
-* **4 ports × 64 bit × 150 MHz = 4.8 GB/s** of port bandwidth, which is more than
-  the DDR can deliver, so the DDR is the only bottleneck.
-* Fused calls: weights for `q|k|v` are stored as one 3840×2560 matrix and
-  `gate|up` as one 13824×2560 matrix, so a layer is **4 commands**
-  (qkv, o, gate_up, down) and a token is 120 commands + LM head.
+* Four identical units, one per HP port; a matrix is split into four equal row
+  ranges. 4 ports × 8 B × 142.857 MHz = 4.57 GB/s of port capacity, above what the DDR
+  delivers, so the DDR is the only bottleneck.
+* Fused matrices: `q|k|v` (3840×2560) and `gate|up` (13824×2560); a layer is 4 engine
+  commands, a token 120 + the coarse head.
 
-## Weight formats in DDR
+## Engine (rtl/, "GEM3")
 
-**Ternary (mode 0).** Row-major, 2 bits per trit, 32 trits per 64-bit word.
-Trit `j` of a row is in bits `[2j+1:2j]` of word `j/32` of that row
-(little-endian), coded as a signed 2-bit value: `00` = 0, `01` = +1, `11` = −1.
-K must be a multiple of 32 (2560 and 6912 are).
+Per command each unit: (1) loads the int8 activation vector(s) into a 5-bank BRAM
+buffer (two sets for two vectors), (2) streams its rows of weights, one 64-bit beat
+per clock, (3) writes one int32 per row (two rows per word; with two vectors one
+`{y_b, y_a}` word per row).
 
-**Int8 (mode 1, LM head).** Row-major int8, 8 weights per 64-bit word, plus one
-float32 scale per row (applied on the PS).
+**T5 weights (mode 0).** Five ternary weights per byte in base 3:
+`byte = Σ (t_i + 1)·3^i`, i = 0..4 (3⁵ = 243 ≤ 256), so a beat carries 40 weights.
+A generated 256-entry decoder (`rtl/t5_decode.v`) turns each byte into five 2-bit
+codes (00 = 0, 01 = +1, 11 = −1); each lane then adds, subtracts or skips its int8
+activation, and a pipelined 40 → 10 → 5 → 1 adder tree sums the beat. K is padded to a
+multiple of 40 (6912 → 6920) with zero weights and zero activations.
 
-Each unit's slice is 4 KiB aligned. Every slice size, `K`, and `R·4` used by
-this model is a multiple of 128 B (one 16-beat AXI3 burst), so bursts never
-cross a 4 KiB boundary.
+**Int8 (mode 1).** 8 weights per beat on DSP multipliers (exact-head fallback, tests).
 
-## CSRs (AXI-Lite, base `0x43C0_0000`)
+**Two vectors (NB = 1).** The same decoded weights feed a second tree for a second
+activation vector, so one pass over the weights evaluates two token positions.
+
+**Progress counters.** Each unit counts acknowledged write bursts (16 beats = 32 rows,
+16 with two vectors). Rows it reports are already in DDR, so the A9 starts on them
+while the engine streams the rest.
+
+Timing: 150 MHz target met (+0.30 ns, GEM2); runs at 142.857 MHz (IO PLL / 7).
+Pipeline: FIFO pop → register (BRAM/FIFO outputs) → T5 decode → products → sums of 4
+→ sums of 2 → beat total → accumulate. Simulation (`make sim STALL=n`) checks every
+case bit-exact against NumPy with random AXI stalls, including 4 KiB boundaries and
+WLAST.
+
+### CSRs (AXI-Lite, base `0x43C0_0000`)
 
 | Offset | Name | Meaning |
 |---|---|---|
-| 0x00 | CTRL | bit0 start (self-clearing) |
-| 0x04 | STATUS | bit0 done (sticky until next start), bit1 busy, bit2 AXI error, bits[7:4] per-unit done, bits[11:8] per-unit error |
-| 0x08 | MODE | 0 = ternary, 1 = int8 |
-| 0x0C | K | input length in elements |
-| 0x10 | ROWS | rows per unit (R) |
-| 0x14 | X_ADDR | activation vector (int8, K bytes, 128 B aligned) |
-| 0x18 | CYCLES | PL clock cycles of the last command (perf counter) |
-| 0x1C | VERSION | engine ID / version |
-| 0x20 + 8u | W_ADDR[u] | weight slice for unit u |
-| 0x24 + 8u | Y_ADDR[u] | output slice for unit u (int32 × R) |
+| 0x00 | CTRL | bit0 start |
+| 0x04 | STATUS | bit0 done, bit1 busy, bit2 AXI error, [7:4] unit done, [11:8] unit error |
+| 0x08 | MODE | 0 = T5 ternary, 1 = int8 |
+| 0x0C | X_BEATS | activation beats per vector (K padded / 8) |
+| 0x10 | ROWS | rows per unit |
+| 0x14 | X_ADDR | activation vector(s), 128 B aligned; second vector at + 8·X_BEATS |
+| 0x18 | CYCLES | PL clocks of the last command |
+| 0x1C | VERSION | `GEM3` (0x47454D33) |
+| 0x20 + 8u | W_ADDR[u] | weight slice of unit u |
+| 0x24 + 8u | Y_ADDR[u] | output slice of unit u |
+| 0x40 + 4u | PROGRESS[u] | write bursts acknowledged in the current command |
+| 0x50 | ROW_BEATS | beats per weight row |
+| 0x54 | NB | 1 = two activation vectors |
 
-## PS software
+## Weight image (BITNET.BIN, `tools/bitnet/board_image.py`)
 
-Bare-metal C, one core first. Per BitLinear: quantize the activation (absmax
-int8), write it to `x`, flush that cache line range, write CSRs, start, poll
-done, invalidate `y`, dequantize with the per-tensor weight scale.
-Everything else (norms, RoPE, attention over the KV cache, ReLU², residual adds,
-argmax) runs on the A9 in float32.
+Loaded from the SD card into DDR at 0x0800_0000 (782 MiB, checksum-verified; reused
+without reloading if it is already in DDR). Each matrix is stored as four unit slices
+`off + u·ustride`, `ustride = round_up(slice, 32 KiB) + 8 KiB`: when the four slices
+started a multiple of 32 KiB apart, all units hit the same DDR bank at once and
+bandwidth halved (2.25 vs 4.05 GB/s, measured). Contents: T5 layers, the T5 coarse
+head with per-row scales, the int8 head (embedding table + exact rescoring), norms.
 
-Weights come from the **SD card** (FAT32, one packed file) and load into DDR at
-boot with xilffs, not over JTAG. The PC side becomes a chat client: it tokenizes,
-sends token ids over UART and prints the ids that come back.
+## A9 software (fpga/ps/bitnet_zybo)
+
+* **Streamed forward pass.** While the engine streams matrix *i*, CPU0 processes the
+  finished rows: dequantize, residual add, ReLU² gate, and the statistics of the next
+  RMSNorm (sum of squares, absmax of `x·w`). `quantize(rmsnorm(x)·w) = quantize(x·w)`
+  because the 1/rms factor cancels in absmax scaling, so after the engine finishes only
+  one quantize pass remains before matrix *i+1* can start.
+* **Coarse LM head.** The engine ranks all 128,256 rows with the T5 copy; CPU0 keeps a
+  running top-64 as rows arrive, then rescores those 64 rows exactly in int8. Over 250
+  decode steps the exact winner was always in the coarse top 16
+  (`tools/bitnet/eval_coarse_head.py`).
+* **Attention** keeps four query heads (one GQA group) per NEON vector through scores,
+  softmax and the value sum; KV cache in fp16, contiguous per KV head. CPU1 handles two
+  of the five KV-head groups (`cpu1.c`: own L1/TLB invalidate, SMP coherency, CPU0's
+  MMU table; started by xsdb at `cpu1_entry`).
+* **Speculative decoding.** Each pass feeds the current token and a guess for the next
+  one (engine NB = 1). The guess comes from the conversation itself (the token that
+  followed the last two tokens earlier) or from a table of the model's own most
+  frequent continuations (`tools/bitnet/ngram_table.py`, built from answers generated by
+  `tools/bitnet/gpu_model.py` on a GPU). The model's prediction always decides; a right
+  guess yields two tokens per pass, a wrong one only costs the second position's A9
+  work. Prompts are read two tokens per pass the same way.
+* Cache maintenance: the engine's x buffer is a normal non-cacheable section (writes
+  stream, no flush); the y buffer is L1-only (outer non-cacheable), so coherence needs
+  only L1 line invalidates.
 
 ## Correctness ladder
 
-1. `tools/bitnet/engine.py` (NumPy) is the golden model. It already reproduces
-   bitnet.cpp's answer ("The capital of France is Paris.").
-2. RTL simulation against Python-generated vectors (random and real weights).
-3. On board: random matrices checked against the A9 computing the same product.
-4. On board: per-layer hidden states compared against `engine.py` dumps.
-5. Full generation compared token-for-token against the emulated run.
-
-## Later headroom
-
-* 1.6-bit packing (5 trits/byte, decoded by a 256-entry LUT in the PL): −20 % bytes.
-* Second A9 core for attention and norms while the PL streams the next matrix.
-* Linux on the PS (UIO driver + reserved memory) once the bare-metal path works.
+1. `tools/bitnet/engine.py` (NumPy) and `tools/bitnet/gpu_model.py` (CUDA, exact int8
+   matmuls) are the golden models.
+2. RTL simulation against Python vectors, random AXI stalls.
+3. On board (`make bench`): random T5 / int8 / two-vector matrices against the A9;
+   rows reported by the progress counters read early and checked.
+4. Full generation compared with the reference answers.

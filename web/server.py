@@ -226,6 +226,13 @@ def main() -> int:
     import uvicorn
     tok = load_tokenizer()
     board = None if args.replay else Board(args.port, args.baud)
+    if board is not None:   # ask the firmware for top-5 candidates per token ('C' toggles)
+        try:
+            for _ in range(2):
+                if "cands=1" in board.command("C", "OK cands=", timeout=3)[-1]:
+                    break
+        except Exception as e:  # noqa: BLE001
+            print(f"note: candidate trace not available ({e})")
     print(f"http://127.0.0.1:{args.http}  ({'replay' if board is None else args.port})")
     uvicorn.run(make_app(board, tok), host="127.0.0.1", port=args.http, log_level="warning")
     return 0
