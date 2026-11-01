@@ -41,14 +41,17 @@ module axi3_rd #(
     reg [31:0] next_addr;
     reg [3:0]  outstanding;    // bursts requested but not fully received
     reg [FIFO_AW:0] fifo_cnt;  // words stored
-    reg [FIFO_AW:0] inflight;  // words requested but not yet stored
+    reg [FIFO_AW:0] space;     // DEPTH - stored - requested-but-not-arrived
+
+    // Registered views of `remaining` keep the issue decision to one short compare.
+    // They lag `remaining` by a cycle, which is safe: after every issue ARVALID is
+    // high for at least one cycle, and after a command load nothing is in flight.
+    reg [4:0]  blen;           // min(16, remaining)
+    reg        rem_nz;
 
     wire       push = rvalid;  // rready is always 1
     wire       pop  = fifo_rd && !fifo_empty;
-    wire [4:0] blen = (remaining >= 28'd16) ? 5'd16 : remaining[4:0];
-
-    wire can_issue = !arvalid && (remaining != 0) && (outstanding < MAX_OUT) &&
-                     ({1'b0, fifo_cnt} + {1'b0, inflight} + blen <= DEPTH);
+    wire       can_issue = !arvalid && rem_nz && (outstanding < MAX_OUT) && (space >= blen);
 
     assign rready     = 1'b1;
     assign fifo_empty = (fifo_cnt == 0);
@@ -62,13 +65,15 @@ module axi3_rd #(
         if (pop)  fifo_dout <= mem[rp];
     end
 
-    always @(posedge clk or negedge rstn) begin
+    always @(posedge clk) begin
         if (!rstn) begin
             remaining   <= 0;
             next_addr   <= 0;
             outstanding <= 0;
             fifo_cnt    <= 0;
-            inflight    <= 0;
+            space       <= DEPTH;
+            blen        <= 0;
+            rem_nz      <= 1'b0;
             arvalid     <= 1'b0;
             araddr      <= 0;
             arlen       <= 0;
@@ -90,10 +95,13 @@ module axi3_rd #(
             if (arvalid && arready)
                 arvalid <= 1'b0;
 
+            blen   <= (remaining >= 28'd16) ? 5'd16 : remaining[4:0];
+            rem_nz <= (remaining != 0);
+
             outstanding <= outstanding + (can_issue && !(cmd_valid && idle) ? 4'd1 : 4'd0)
                                        - (rvalid && rlast ? 4'd1 : 4'd0);
-            inflight    <= inflight + (can_issue && !(cmd_valid && idle) ? blen : 5'd0)
-                                    - (push ? 1'b1 : 1'b0);
+            space       <= space - (can_issue && !(cmd_valid && idle) ? blen : 5'd0)
+                                 + (pop ? 1'b1 : 1'b0);
             fifo_cnt    <= fifo_cnt + (push ? 1'b1 : 1'b0) - (pop ? 1'b1 : 1'b0);
 
             if (push) wp <= wp + 1'b1;

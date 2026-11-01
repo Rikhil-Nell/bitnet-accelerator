@@ -9,7 +9,7 @@
 // mode 0 (ternary): 32 weights per beat, signed 2-bit (00=0, 01=+1, 11=-1)
 // mode 1 (int8):     8 weights per beat
 //
-// Datapath: one beat per clock, five pipeline stages, no internal stalls.
+// Datapath: one beat per clock, six pipeline stages, no internal stalls.
 // The input FIFO is only popped while the output FIFO has room for everything
 // that could still come out of the pipeline.
 module gemv_unit (
@@ -49,6 +49,10 @@ module gemv_unit (
     input  wire        bvalid,
     output wire        bready
 );
+    // Local synchronous reset: one register per unit keeps the reset net short.
+    (* max_fanout = 32 *) reg rst_n;
+    always @(posedge clk) rst_n <= rstn;
+
     localparam S_IDLE = 3'd0, S_ACT = 3'd1, S_WREQ = 3'd2, S_RUN = 3'd3, S_FLUSH = 3'd4;
 
     reg [2:0]  state;
@@ -68,7 +72,7 @@ module gemv_unit (
     wire       fifo_empty;
 
     axi3_rd u_rd (
-        .clk(clk), .rstn(rstn),
+        .clk(clk), .rstn(rst_n),
         .cmd_valid(rd_cmd), .cmd_addr(rd_addr), .cmd_beats(rd_beats),
         .idle(rd_idle), .err(rd_err),
         .araddr(araddr), .arlen(arlen), .arvalid(arvalid), .arready(arready),
@@ -83,7 +87,7 @@ module gemv_unit (
     wire [5:0] out_cnt;
 
     axi3_wr u_wr (
-        .clk(clk), .rstn(rstn),
+        .clk(clk), .rstn(rst_n),
         .cmd_valid(wr_cmd), .cmd_addr(y_addr), .cmd_beats({13'd0, rows[15:1]}),
         .idle(wr_idle), .err(wr_err),
         .push(out_push), .din(out_word), .fifo_count(out_cnt),
@@ -143,33 +147,38 @@ module gemv_unit (
         act_raddr = mode_q ? col[9:2] : col[7:0];
     end
 
-    // ---------------- stage B: products ----------------
-    reg               vc, last_c;
-    reg signed [8:0]  tp [0:31];
-    reg signed [15:0] ip [0:7];
-    integer i, j, m;
-
-    wire [255:0] act_word = {a3, a2, a1, a0};
-    reg  [63:0]  act_sel;
-    always @(*) begin
+    // ---------------- stage R: register BRAM / FIFO outputs ----------------
+    reg         vr, last_r;
+    reg [63:0]  w_r;
+    reg [255:0] act_word;
+    reg [63:0]  act_sel;
+    always @(posedge clk) begin
+        w_r      <= fifo_dout;
+        act_word <= {a3, a2, a1, a0};
         case (sel_b)
-            2'd0: act_sel = a0;
-            2'd1: act_sel = a1;
-            2'd2: act_sel = a2;
-            default: act_sel = a3;
+            2'd0: act_sel <= a0;
+            2'd1: act_sel <= a1;
+            2'd2: act_sel <= a2;
+            default: act_sel <= a3;
         endcase
     end
 
+    // ---------------- stage B: products ----------------
+    reg               vc, last_c;
+    reg signed [8:0]  tp [0:31];
+    (* use_dsp = "yes" *) reg signed [15:0] ip [0:7];
+    integer i, j, m;
+
     always @(posedge clk) begin
         for (i = 0; i < 32; i = i + 1) begin
-            case (fifo_dout[2*i +: 2])
+            case (w_r[2*i +: 2])
                 2'b01:   tp[i] <=  $signed({act_word[8*i+7], act_word[8*i +: 8]});
                 2'b11:   tp[i] <= -$signed({act_word[8*i+7], act_word[8*i +: 8]});
                 default: tp[i] <= 9'sd0;
             endcase
         end
         for (i = 0; i < 8; i = i + 1)
-            ip[i] <= $signed(act_sel[8*i +: 8]) * $signed(fifo_dout[8*i +: 8]);
+            ip[i] <= $signed(act_sel[8*i +: 8]) * $signed(w_r[8*i +: 8]);
     end
 
     // ---------------- stage C: partial sums ----------------
@@ -200,10 +209,10 @@ module gemv_unit (
     reg [31:0]        lo;
     wire signed [31:0] acc_next = acc + beat_sum;
 
-    wire pipe_empty = !vb && !vc && !vd && !ve;
+    wire pipe_empty = !vb && !vr && !vc && !vd && !ve;
 
-    always @(posedge clk or negedge rstn) begin
-        if (!rstn) begin
+    always @(posedge clk) begin
+        if (!rst_n) begin
             state      <= S_IDLE;
             done       <= 1'b0;
             mode_q     <= 1'b0;
@@ -221,8 +230,8 @@ module gemv_unit (
             col        <= 0;
             row        <= 0;
             popped_all <= 1'b0;
-            vb <= 0; vc <= 0; vd <= 0; ve <= 0;
-            last_b <= 0; last_c <= 0; last_d <= 0; last_e <= 0;
+            vb <= 0; vr <= 0; vc <= 0; vd <= 0; ve <= 0;
+            last_b <= 0; last_r <= 0; last_c <= 0; last_d <= 0; last_e <= 0;
             sel_b      <= 0;
             acc        <= 0;
             have_lo    <= 1'b0;
@@ -295,7 +304,8 @@ module gemv_unit (
                 end
             end
             // stages B..D valid/last
-            vc <= vb; last_c <= last_b;
+            vr <= vb; last_r <= last_b;
+            vc <= vr; last_c <= last_r;
             vd <= vc; last_d <= last_c;
             ve <= vd; last_e <= last_d;
 

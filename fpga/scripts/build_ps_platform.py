@@ -1,4 +1,9 @@
-"""Vitis 2026 embedded Python: platform + standalone app for system_8x8_test."""
+"""Vitis 2026 embedded Python: (re)build the standalone platform from the current XSA
+and build the app in fpga/ps/$BITNET_PS_APP.
+
+The platform is rebuilt whenever build/vivado/bitnet_zybo.xsa is newer than it, so a
+new bitstream can never be paired with stale xparameters.h / ps7_init.
+"""
 from __future__ import annotations
 
 import os
@@ -10,10 +15,10 @@ os.environ["VITIS_EMBEDDED_INSTALL"] = "true"
 
 REPO = Path(__file__).resolve().parents[2]
 XSA = REPO / "build/vivado/bitnet_zybo.xsa"
-XSA_STAGE = Path(os.environ.get("BITNET_XSA", "D:/xilinx-tools/bitnet_zybo.xsa"))
+XSA_STAGE = Path(os.environ.get("BITNET_XSA", "D:/xilinx-tools/stage/bitnet_zybo.xsa"))
 # Avoid spaces in user profile paths — Vitis platform gen can reject them.
-WS = Path(os.environ.get("BITNET_VITIS_WS", "D:/xilinx-tools/bitnet_vitis_ws_clean"))
-APP = os.environ.get("BITNET_PS_APP", "system_8x8_test")
+WS = Path(os.environ.get("BITNET_VITIS_WS", "D:/xilinx-tools/vitis_ws"))
+APP = os.environ.get("BITNET_PS_APP", "gemv_bench")
 PS_SRC = REPO / "fpga/ps" / APP
 
 
@@ -26,9 +31,17 @@ def main() -> int:
         XSA_STAGE.write_bytes(XSA.read_bytes())
     hw = str(XSA_STAGE)
 
+    import shutil
+
     import vitis
 
+    stamp = WS.parent / f"{WS.name}.xsa_stamp"   # outside: Vitis rejects unknown files in a new workspace
+    if WS.exists() and (not stamp.is_file() or stamp.read_text().strip() != str(XSA.stat().st_mtime_ns)
+                        or not (WS / "_ide").exists()):
+        print(f"XSA changed: recreating workspace {WS}")
+        shutil.rmtree(WS)
     WS.mkdir(parents=True, exist_ok=True)
+    stamp.write_text(str(XSA.stat().st_mtime_ns))
     ide = WS / "_ide"
     for stale in (ide / ".peers.ini", ide / "workspace_journal.py"):
         if stale.is_file():
@@ -63,6 +76,12 @@ def main() -> int:
             cpu=cpu,
             domain_name="standalone_domain",
         )
+        # SD card weight loading: FatFs with exFAT (big cards ship exFAT-formatted)
+        dom = platform.get_domain("standalone_domain")
+        dom.set_lib("xilffs")
+        for key, val in (("XILFFS_enable_exfat", "true"), ("XILFFS_read_only", "true"),
+                         ("XILFFS_use_mkfs", "false")):
+            dom.set_config("lib", key, val, "xilffs")
         status = platform.build()
         if status:
             print(f"Platform build status: {status}")
@@ -84,6 +103,13 @@ def main() -> int:
             template="empty_application",
         )
 
+    # Release build: the forward pass runs on the A9, so optimisation matters.
+    comp.set_app_config(key="USER_COMPILE_OPTIMIZATION_LEVEL", values="-O3")
+    comp.set_app_config(key="USER_COMPILE_OPTIMIZATION_OTHER_FLAGS",
+                        values="-mfpu=neon -ffast-math -funroll-loops")
+    comp.set_app_config(key="USER_COMPILE_DEBUG_LEVEL", values="-g1")
+    comp.set_app_config(key="USER_LINK_LIBRARIES", values="m")
+
     app_src = WS / APP / "src"
     app_src.mkdir(parents=True, exist_ok=True)
     for src in PS_SRC.iterdir():
@@ -98,7 +124,7 @@ def main() -> int:
     for candidate in WS.rglob(f"{APP}.elf"):
         print(f"Built PS app: {candidate}")
         return 0
-    print("Build finished but ELF not found under build/vitis", file=sys.stderr)
+    print(f"Build finished but {APP}.elf not found under {WS}", file=sys.stderr)
     return 1
 
 

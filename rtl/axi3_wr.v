@@ -43,8 +43,11 @@ module axi3_wr #(
     reg [FIFO_AW-1:0] wp, rp;
     reg [63:0] mem [0:DEPTH-1];
 
-    wire [4:0] blen  = (remaining >= 28'd16) ? 5'd16 : remaining[4:0];
-    wire       start_burst = !awvalid && (w_left == 0) && (remaining != 0) && (cnt >= blen);
+    // Registered min(16, remaining): lags by a cycle, which is safe because after
+    // every burst start AWVALID / w_left keep start_burst low for several cycles.
+    reg [4:0]  blen;
+    reg        rem_nz;
+    wire       start_burst = !awvalid && (w_left == 0) && rem_nz && (cnt >= blen);
     wire       wfire = wvalid && wready;
 
     assign fifo_count = cnt;
@@ -58,7 +61,7 @@ module axi3_wr #(
         if (push) mem[wp] <= din;
     end
 
-    always @(posedge clk or negedge rstn) begin
+    always @(posedge clk) begin
         if (!rstn) begin
             remaining <= 0;
             next_addr <= 0;
@@ -71,7 +74,11 @@ module axi3_wr #(
             awaddr    <= 0;
             awlen     <= 0;
             err       <= 1'b0;
+            blen      <= 0;
+            rem_nz    <= 1'b0;
         end else begin
+            blen   <= (remaining >= 28'd16) ? 5'd16 : remaining[4:0];
+            rem_nz <= (remaining != 0);
             if (cmd_valid && idle) begin
                 remaining <= cmd_beats;
                 next_addr <= cmd_addr;

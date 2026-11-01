@@ -1,4 +1,4 @@
-"""Sync fpga/ps sources and rebuild existing system_8x8_test component."""
+"""Sync fpga/ps/$BITNET_PS_APP sources and rebuild that existing app component (platform unchanged)."""
 from __future__ import annotations
 
 import os
@@ -8,8 +8,8 @@ from pathlib import Path
 os.environ["VITIS_EMBEDDED_INSTALL"] = "true"
 
 REPO = Path(__file__).resolve().parents[2]
-WS = Path(os.environ.get("BITNET_VITIS_WS", "D:/xilinx-tools/bitnet_vitis_ws_clean"))
-APP = os.environ.get("BITNET_PS_APP", "system_8x8_test")
+WS = Path(os.environ.get("BITNET_VITIS_WS", "D:/xilinx-tools/vitis_ws"))
+APP = os.environ.get("BITNET_PS_APP", "gemv_bench")
 PS_SRC = REPO / "fpga/ps" / APP
 
 import vitis

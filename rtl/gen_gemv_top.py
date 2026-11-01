@@ -90,6 +90,8 @@ def main() -> None:
     reg        counting;
 
     wire [NU-1:0] u_done, u_busy, u_err;
+    reg rst_n;
+    always @(posedge aclk) rst_n <= aresetn;
     wire all_done = &u_done && !start;
 
     reg awready_r, wready_r, bvalid_r, arready_r, rvalid_r;
@@ -107,8 +109,8 @@ def main() -> None:
     wire rd_go = s_axi_arvalid && !rvalid_r && !arready_r;
 
     integer n;
-    always @(posedge aclk or negedge aresetn) begin
-        if (!aresetn) begin
+    always @(posedge aclk) begin
+        if (!rst_n) begin
             awready_r <= 1'b0; wready_r <= 1'b0; bvalid_r <= 1'b0;
             arready_r <= 1'b0; rvalid_r <= 1'b0; rdata_r  <= 32'd0;
             start <= 1'b0; mode <= 1'b0; k <= 16'd0; rows <= 16'd0; x_addr <= 32'd0;
