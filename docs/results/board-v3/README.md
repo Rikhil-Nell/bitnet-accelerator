@@ -21,6 +21,17 @@ Per pass (France, 2 cores): engine stream 153.9 ms (490 MB at 3.2 GB/s, with 52.
 A9 epilogue work hidden inside it), serial A9 work 18.6 ms (attention 7.6, quantize 6.8,
 RoPE 1.6, norm stats 1.4, the rest < 1).
 
+## Measured at 83 MHz (default boot clock on USB power), CPU1 takes position 2
+
+Per-unit statistics merged in a fixed order make the output reproducible run to run.
+Speculation is exact: with guessing switched off ('N') the same pass gives the same text.
+
+| Prompt | Tokens / pass | ms / pass | stream (PL + hidden A9) | serial A9 | ms / token |
+|---|---|---|---|---|---|
+| France (8 tokens) | 1.40 | 200.7 | 184.4 | 16.3 | 143 |
+| Romeo and Juliet (48) | 1.27 | 207.2 | 184.5 | 22.7 | 163 |
+| Romeo and Juliet, no guessing | 1.00 | 200.6 | 183.3 | 17.3 | 201 |
+
 ## Projection to 142.857 MHz (5 V supply)
 
 The stream becomes 490 MB / 4.05 GB/s = 121 ms (measured bandwidth at full clock, engine
@@ -28,8 +39,8 @@ v2 bench). Serial A9 work is clock-independent.
 
 | Prompt | Pass | Tokens / pass | ms / token | tok/s |
 |---|---|---|---|---|
-| France | 121 + 18.6 ms | 1.40 | 100 | **10.0** |
-| Romeo and Juliet (48 tokens) | 121 + 27.7 ms | 1.23 | 121 | **8.3** |
+| France | 121 + 16.3 ms | 1.40 | 98 | **10.2** |
+| Romeo and Juliet (48 tokens) | 121 + 22.7 ms | 1.27 | 113 | **8.8** |
 
 ## Engine bench (v2 bitstream, full clock)
 

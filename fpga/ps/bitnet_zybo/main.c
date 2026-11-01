@@ -762,6 +762,23 @@ static const int32_t *Y[NBMAX];                  /* per-vector engine output, ro
 static struct { float f[NBMAX], fq[NBMAX], fk[NBMAX], fv[NBMAX], fg[NBMAX], fu[NBMAX];
                 const float *w; stats_t st[NBMAX]; } nv;
 
+/* Epilogue statistics are accumulated per engine unit (rows of one unit always arrive
+   in order) and merged in a fixed order, so results do not depend on the timing of the
+   four units: a float sum in arrival order would differ in the last bits run to run. */
+static stats_t stu[NBMAX][GEMV_NU];
+static int cur_rpu;
+static void stu_init(void) {
+    for (int v = 0; v < NBMAX; v++) for (int u = 0; u < GEMV_NU; u++) stats_init(&stu[v][u]);
+}
+static void stu_merge(int nb) {
+    for (int v = 0; v < nb; v++) {
+        float32x4_t ss = stu[v][0].ss, am = stu[v][0].amax;
+        for (int u = 1; u < GEMV_NU; u++) { ss = vaddq_f32(ss, stu[v][u].ss); am = vmaxq_f32(am, stu[v][u].amax); }
+        nv.st[v].ss = ss;
+        nv.st[v].amax = am;
+    }
+}
+
 /* {a, b} pairs -> two arrays, rows [r0, r1) */
 static void split2(int r0, int r1) {
     const int32_t *s = ybuf + 2 * r0;
@@ -785,6 +802,7 @@ static void rows_ready(int g0, int g1) {
 
 static void stream_rows_nb(int n, rows_fn fn) {
     const int rpu = n / GEMV_NU, rpb = nbc == 2 ? 16 : 32;
+    cur_rpu = rpu;
     int done[GEMV_NU] = {0, 0, 0, 0};
     for (;;) {
         int fin = gemv_done(), left = 0;
@@ -824,7 +842,7 @@ static void nb_epi_qkv(int r0, int r1) {
 
 static void nb_epi_resid(int r0, int r1) {
     for (int v = 0; v < nbc; v++)
-        k_resid_norm(XR[v] + r0, HB[v] + r0, Y[v] + r0, nv.w + r0, r1 - r0, nv.f[v], &nv.st[v]);
+        k_resid_norm(XR[v] + r0, HB[v] + r0, Y[v] + r0, nv.w + r0, r1 - r0, nv.f[v], &stu[v][r0 / cur_rpu]);
 }
 
 /* gate rows live in units 0-1 and up rows in units 2-3 (matching pace) */
@@ -847,7 +865,7 @@ static void stream_gate_up_nb(void) {
                 rows_ready(i0, i1);
                 rows_ready(F + i0, F + i1);
                 for (int v = 0; v < nbc; v++)
-                    k_gate_norm(GB[v] + i0, Y[v] + i0, Y[v] + F + i0, nv.w + i0, i1 - i0, nv.fg[v], nv.fu[v], &nv.st[v]);
+                    k_gate_norm(GB[v] + i0, Y[v] + i0, Y[v] + F + i0, nv.w + i0, i1 - i0, nv.fg[v], nv.fu[v], &stu[v][p]);
                 ov_epi += now() - t;
                 done[p] = r;
             }
@@ -979,21 +997,27 @@ static void forward_nb(const int *tok, int nb, int want_logits, int *best) {
         }
         PT(P_NORM);
         nb_launch(IMG(L->o_off), H->ustride_o, HB, st_in, E, E, E, s);
-        for (int v = 0; v < nb; v++) { nv.f[v] = dq(L->s_o, s[v]); stats_init(&nv.st[v]); }
+        for (int v = 0; v < nb; v++) nv.f[v] = dq(L->s_o, s[v]);
+        stu_init();
         nv.w = (const float *)IMG(L->ffn_norm_off);
         stream_rows_nb(E, nb_epi_resid);
+        stu_merge(nb);
 
         for (int v = 0; v < nb; v++) st_in[v] = nv.st[v];
         nb_launch(IMG(L->gate_up_off), H->ustride_gate_up, HB, st_in, 2 * F, E, E, s);
-        for (int v = 0; v < nb; v++) { nv.fg[v] = dq(L->s_gate, s[v]); nv.fu[v] = dq(L->s_up, s[v]); stats_init(&nv.st[v]); }
+        for (int v = 0; v < nb; v++) { nv.fg[v] = dq(L->s_gate, s[v]); nv.fu[v] = dq(L->s_up, s[v]); }
+        stu_init();
         nv.w = (const float *)IMG(L->ffn_sub_norm_off);
         stream_gate_up_nb();
+        stu_merge(nb);
 
         for (int v = 0; v < nb; v++) st_in[v] = nv.st[v];
         nb_launch(IMG(L->down_off), H->ustride_down, GB, st_in, E, F, F, s);
-        for (int v = 0; v < nb; v++) { nv.f[v] = dq(L->s_down, s[v]); stats_init(&nv.st[v]); }
+        for (int v = 0; v < nb; v++) nv.f[v] = dq(L->s_down, s[v]);
+        stu_init();
         nv.w = (const float *)IMG(l + 1 < H->n_layer ? LT[l + 1].attn_norm_off : H->output_norm_off);
         stream_rows_nb(E, nb_epi_resid);
+        stu_merge(nb);
     }
     n_past += nb;
     if (!want_logits) { gemv_w(0x54, 0); return; }
@@ -1169,6 +1193,7 @@ static const char *parse_int(const char *s, int *v) {
    token after it (engine NB = 2). The model's prediction for the current token decides;
    if it equals the guess, the second position's prediction is valid too and the pass
    produced two tokens. A wrong guess only costs the A9 work of the second position. */
+static int use_drafts = 1;    /* 0: same pass, never guess (for checking speculation is exact) */
 static int ctx_ids[MAX_CTX + 2];
 static int ctx_n;
 static uint32_t spec_passes, spec_drafts, spec_hits;
@@ -1210,7 +1235,7 @@ static void generate_spec(const int *ids, int n, int max_new) {
         gen++;
         if (next == TOK_EOT || next == TOK_EOS || gen == max_new) break;
         ctx_ids[ctx_n++] = next;
-        int d = n_past + 2 < MAX_CTX ? draft_next(ctx_ids, ctx_n) : -1;
+        int d = use_drafts && n_past + 2 < MAX_CTX ? draft_next(ctx_ids, ctx_n) : -1;
         int tok2[2] = {next, d};
         spec_passes++;
         if (d >= 0) {
@@ -1298,12 +1323,12 @@ int main(void) {
     Xil_SetTlbAttributes(XQ_ADDR, NORM_NONCACHE);
     Xil_DCacheFlush();
     if (load_image() != 0) { xil_printf("# HALT\r\n"); return 1; }
-    /* Start the engine at 100 MHz (3.2 GB/s): on USB power the board browns out above
-       ~3.2 GB/s. With a 5 V supply, 'F 7' (or make board FCLK_DIV=7) gives 142.9 MHz. */
+    /* Start the engine at 83 MHz (2.7 GB/s): on USB power the board browns out above
+       ~3.2 GB/s (sometimes at 3.2). With a 5 V supply, 'F 7' (or make board FCLK_DIV=7) gives 142.9 MHz. */
     Xil_Out32(0xF8000008u, 0xDF0Du);
-    Xil_Out32(0xF8000170u, (Xil_In32(0xF8000170u) & ~(0x3Fu << 8)) | (10u << 8));
+    Xil_Out32(0xF8000170u, (Xil_In32(0xF8000170u) & ~(0x3Fu << 8)) | (12u << 8));
     Xil_Out32(0xF8000004u, 0x767Bu);
-    xil_printf("# engine clock 100 MHz (send 'F 7' for 142.9 MHz on a 5 V supply)\r\n");
+    xil_printf("# engine clock 83 MHz (send 'F 7' for 142.9 MHz on a 5 V supply)\r\n");
     for (int i = 0; i < HEAD_DIM / 2; i++)
         inv_freq[i] = 1.0 / pow((double)H->rope_theta, (double)(2 * i) / HEAD_DIM);
     xil_printf("# model: %u layers, vocab %u, ctx %d, CPU1 %s\r\nREADY\r\n", H->n_layer, H->vocab, MAX_CTX,
@@ -1315,6 +1340,7 @@ int main(void) {
             case 'G': cmd_generate(line + 1); break;
             case 'R': n_past = 0; ctx_n = 0; xil_printf("OK\r\n"); break;
             case 'C': trace_cands = !trace_cands; xil_printf("OK cands=%d\r\n", trace_cands); break;
+            case 'N': use_drafts = !use_drafts; xil_printf("OK drafts=%d\r\n", use_drafts); break;
             case 'S': use_spec = !use_spec; xil_printf("OK spec=%d (engine v3 %s)\r\n", use_spec, engine_v3 ? "yes" : "no"); break;
             case 'V': verbose = !verbose; xil_printf("OK verbose=%d\r\n", verbose); break;
             case 'M': { int m = 0; parse_int(line + 1, &m); set_mem_mode(m);
