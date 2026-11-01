@@ -34,8 +34,9 @@ static inline int t5_k(int k) { return (k + 39) / 40 * 40; }
  * rows of k bytes). x: int8, zero-padded to t5_k(k) for T5, 128-byte aligned, already
  * visible in DDR. y: int32 [n], unit u writes rows [u*n/4, (u+1)*n/4).
  */
-static inline void gemv_start(int mode, const void *w, uint32_t ustride, const int8_t *x,
-                              int32_t *y, int n, int k) {
+/* nb = activation vectors (2: GEM3 NB mode, 8 output bytes per row) */
+static inline void gemv_start_nb(int mode, const void *w, uint32_t ustride, const int8_t *x,
+                                 int32_t *y, int n, int k, int nb) {
     uint32_t rows = (uint32_t)n / GEMV_NU;
     uint32_t kp = mode == GEMV_T5 ? (uint32_t)t5_k(k) : (uint32_t)k;
     gemv_w(0x08, (uint32_t)mode);
@@ -45,9 +46,14 @@ static inline void gemv_start(int mode, const void *w, uint32_t ustride, const i
     gemv_w(0x14, (uint32_t)(uintptr_t)x);
     for (uint32_t u = 0; u < GEMV_NU; u++) {
         gemv_w(0x20 + 8u * u, (uint32_t)(uintptr_t)w + u * ustride);
-        gemv_w(0x24 + 8u * u, (uint32_t)(uintptr_t)y + u * rows * 4u);
+        gemv_w(0x24 + 8u * u, (uint32_t)(uintptr_t)y + u * rows * 4u * (uint32_t)nb);
     }
     gemv_w(0x00, 1u);
+}
+
+static inline void gemv_start(int mode, const void *w, uint32_t ustride, const int8_t *x,
+                              int32_t *y, int n, int k) {
+    gemv_start_nb(mode, w, ustride, x, y, n, k, 1);
 }
 
 static inline int gemv_done(void) { return gemv_r(0x04) & 1u; }

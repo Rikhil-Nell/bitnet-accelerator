@@ -175,11 +175,27 @@ static int attn_v3 = 1;
  * coherent between the cores (SMP bit, shareable DDR), so a job is plain stores +
  * barriers; WFE/SEV avoid busy-polling the bus. */
 #define CPU1_MAGIC 0xC0DE0001u
+enum { JOB_ATTN = 0, JOB_QUANT = 1 };
 static struct {
     volatile uint32_t seq, done, alive;
-    volatile int l, pos, g0, g1;
+    volatile int type;
+    volatile int l, pos, g0, g1;            /* JOB_ATTN: KV-head groups [g0, g1) of position pos */
     float *volatile q, *volatile o;
+    int8_t *volatile qdst;                  /* JOB_QUANT: qdst[0..n) = round(qsrc * qs) */
+    const float *volatile qsrc;
+    volatile int qn;
+    volatile float qs;
 } __attribute__((aligned(32))) job;
+
+static void cpu1_post(void) {
+    __asm__ volatile("dmb" ::: "memory");
+    job.seq = job.seq + 1u;
+    __asm__ volatile("dsb\n\tsev" ::: "memory");
+}
+static void cpu1_wait(void) {
+    while (job.done != job.seq) { }
+    __asm__ volatile("dmb" ::: "memory");
+}
 static int dual_core = 1;
 
 void cpu1_main(void) {
@@ -191,11 +207,15 @@ void cpu1_main(void) {
         while (job.seq == seen) __asm__ volatile("wfe" ::: "memory");
         seen = job.seq;
         __asm__ volatile("dmb" ::: "memory");
-        const int l = job.l, T = job.pos + 1;
-        float *q = job.q, *o = job.o;
-        for (int g = job.g0; g < job.g1; g++)
-            attn_group(o + g * 4 * HEAD_DIM, q + g * 4 * HEAD_DIM, kv_k + KVI(l, g, 0),
-                       kv_v + KVI(l, g, 0), T, sc4b);
+        if (job.type == JOB_QUANT) {
+            k_quantize_s(job.qdst, job.qsrc, job.qn, job.qs);
+        } else {
+            const int l = job.l, T = job.pos + 1;
+            float *q = job.q, *o = job.o;
+            for (int g = job.g0; g < job.g1; g++)
+                attn_group(o + g * 4 * HEAD_DIM, q + g * 4 * HEAD_DIM, kv_k + KVI(l, g, 0),
+                           kv_v + KVI(l, g, 0), T, sc4b);
+        }
         __asm__ volatile("dmb" ::: "memory");
         job.done = seen;
         __asm__ volatile("dsb\n\tsev" ::: "memory");
@@ -211,6 +231,7 @@ static void attention_into(int l, int pos, float *q, float *o) {
     uint32_t s = 0;
     if (dual_core && job.alive == CPU1_MAGIC) {   /* CPU1 takes KV heads 3..4 */
         g_split = 3;
+        job.type = JOB_ATTN;
         job.l = l; job.pos = pos; job.g0 = g_split; job.g1 = N_KV_HEAD; job.q = q; job.o = o;
         __asm__ volatile("dmb" ::: "memory");
         s = job.seq + 1u;
@@ -843,19 +864,26 @@ static void stream_gate_up_nb(void) {
 static void nb_launch(const void *w, uint32_t ustride, float *const *u, const stats_t *st, int n_rows,
                       int k, int n_norm, float *s_out) {
     const int kp = t5_k(k);
-    for (int v = 0; v < nbc; v++) {
+    const int split = nbc == 2 && dual_core && job.alive == CPU1_MAGIC;
+    for (int v = nbc - 1; v >= 0; v--) {    /* vector 1 first, so CPU1 can start on it */
         float ss = stats_ss(&st[v]), amax = stats_amax(&st[v]);
         float r = 1.0f / sqrtf(ss / (float)n_norm + H->rms_eps);
         float qs = amax > 0.0f ? 127.0f / amax : 0.0f;
-        k_quantize_s(XQ[v], u[v], k, qs);
         s_out[v] = qs / r;
+        if (split && v == 1) {
+            job.type = JOB_QUANT; job.qdst = XQ[1]; job.qsrc = u[1]; job.qn = k; job.qs = qs;
+            cpu1_post();
+        } else {
+            k_quantize_s(XQ[v], u[v], k, qs);
+        }
     }
+    if (split) cpu1_wait();
     PT(P_QUANT);
     for (int v = 0; v < nbc; v++) memcpy(xq + v * kp, XQ[v], (size_t)kp);
     __asm__ volatile("dsb" ::: "memory");
     PT(P_FLUSH);
     gemv_w(0x54, nbc == 2);
-    gemv_start(GEMV_T5, w, ustride, xq, ybuf, n_rows, k);
+    gemv_start_nb(GEMV_T5, w, ustride, xq, ybuf, n_rows, k, nbc);
 }
 
 static struct { int k, mi; float thr; int idx[CH_TOPK]; float val[CH_TOPK]; } tkv[NBMAX];
@@ -929,7 +957,19 @@ static void forward_nb(const int *tok, int nb, int want_logits, int *best) {
             }
         }
         PT(P_ROPE);
-        for (int v = 0; v < nb; v++) attention_into((int)l, pos + v, QB[v], OB[v]);
+        if (nb == 2 && dual_core && job.alive == CPU1_MAGIC) {
+            /* CPU1: all of position 2; CPU0: all of position 1 */
+            job.type = JOB_ATTN; job.l = (int)l; job.pos = pos + 1; job.g0 = 0; job.g1 = N_KV_HEAD;
+            job.q = QB[1]; job.o = OB[1];
+            cpu1_post();
+            static float32x4_t sc4a[MAX_CTX + 1];
+            for (int g = 0; g < N_KV_HEAD; g++)
+                attn_group(OB[0] + g * 4 * HEAD_DIM, QB[0] + g * 4 * HEAD_DIM, kv_k + KVI(l, g, 0),
+                           kv_v + KVI(l, g, 0), pos + 1, sc4a);
+            cpu1_wait();
+        } else {
+            for (int v = 0; v < nb; v++) attention_into((int)l, pos + v, QB[v], OB[v]);
+        }
         PT(P_ATTN);
 
         for (int v = 0; v < nb; v++) {
@@ -969,7 +1009,7 @@ static void forward_nb(const int *tok, int nb, int want_logits, int *best) {
     __asm__ volatile("dsb" ::: "memory");
     PT(P_FLUSH);
     gemv_w(0x54, nb == 2);
-    gemv_start(GEMV_T5, IMG(H->coarse_off), H->ustride_coarse, xq, ybuf, (int)H->vocab, E);
+    gemv_start_nb(GEMV_T5, IMG(H->coarse_off), H->ustride_coarse, xq, ybuf, (int)H->vocab, E, nb);
     stream_rows_nb((int)H->vocab, nb_topk);
     gemv_w(0x54, 0);
     for (int v = 0; v < nb; v++) {
@@ -1254,9 +1294,16 @@ int main(void) {
     }
     /* x / y buffers: L1 only (see kernels.h), then push anything stale out of L2 */
     Xil_SetTlbAttributes(WORK_ADDR, WORK_SECTION_ATTR);
+    Xil_SetTlbAttributes(WORK_ADDR + 0x100000u, WORK_SECTION_ATTR);   /* y of 2 x 128256 rows > 1 MB */
     Xil_SetTlbAttributes(XQ_ADDR, NORM_NONCACHE);
     Xil_DCacheFlush();
     if (load_image() != 0) { xil_printf("# HALT\r\n"); return 1; }
+    /* Start the engine at 100 MHz (3.2 GB/s): on USB power the board browns out above
+       ~3.2 GB/s. With a 5 V supply, 'F 7' (or make board FCLK_DIV=7) gives 142.9 MHz. */
+    Xil_Out32(0xF8000008u, 0xDF0Du);
+    Xil_Out32(0xF8000170u, (Xil_In32(0xF8000170u) & ~(0x3Fu << 8)) | (10u << 8));
+    Xil_Out32(0xF8000004u, 0x767Bu);
+    xil_printf("# engine clock 100 MHz (send 'F 7' for 142.9 MHz on a 5 V supply)\r\n");
     for (int i = 0; i < HEAD_DIM / 2; i++)
         inv_freq[i] = 1.0 / pow((double)H->rope_theta, (double)(2 * i) / HEAD_DIM);
     xil_printf("# model: %u layers, vocab %u, ctx %d, CPU1 %s\r\nREADY\r\n", H->n_layer, H->vocab, MAX_CTX,
@@ -1276,7 +1323,7 @@ int main(void) {
             case 'F': {   /* FCLK0 = 1000 MHz IO PLL / div (7 = 142.9 MHz). Lower = less power. */
                 int div = 0;
                 parse_int(line + 1, &div);
-                if (div >= 7 && div <= 20 && gemv_done()) {
+                if (div >= 7 && div <= 20 && !(gemv_r(0x04) & 2u)) {   /* engine not busy */
                     Xil_Out32(0xF8000008u, 0xDF0Du);                  /* SLCR unlock */
                     uint32_t v = Xil_In32(0xF8000170u);               /* FPGA0_CLK_CTRL */
                     v = (v & ~(0x3Fu << 8)) | ((uint32_t)div << 8);   /* DIVISOR0 */

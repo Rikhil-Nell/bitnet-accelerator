@@ -8,7 +8,7 @@ ENV    := . '$(CURDIR)/tools/setup/env.ps1';
 
 help:
 	@echo "Run it (board on, SD card with BITNET.BIN in the slot)"
-	@echo "  board               program the FPGA and boot the model (~45 s to READY)"
+	@echo "  board [FCLK_DIV=7]  program the FPGA and boot the model (engine at 100 MHz; 7 = 142.9 MHz, 5 V supply)"
 	@echo "  chat [COM=COM4]     chat with the model from this PC"
 	@echo "  demo [COM=COM4]     web page: write-up + live chat/profile, http://127.0.0.1:8000"
 	@echo "  demo-replay         the same page without a board (recorded answer)"
@@ -54,6 +54,7 @@ board: program
 	$(PS) -File tools/setup/stop_hw_server.ps1
 	$(PS) -File tools/setup/run_ps_xsdb.ps1
 	$(PYTHON) tools/bitnet/uart_log.py --port $(COM) --until "READY|HALT" --timeout 300
+	$(if $(FCLK_DIV),$(PYTHON) tools/bitnet/board_cmd.py "F $(FCLK_DIV)" --until "^OK" --timeout 5)
 
 chat:
 	$(PYTHON) tools/bitnet/chat.py --port $(COM)
