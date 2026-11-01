@@ -14,7 +14,7 @@ replaced rather than tuned. Results are in `docs/results/baseline-8x8-uart/`.
 | # | Milestone | Status |
 |---|---|---|
 | 0 | Repo cleanup, baseline tagged, architecture written | done |
-| 1 | GEMV engine RTL (ternary + int8), xsim against Python vectors | |
+| 1 | GEMV engine RTL (ternary + int8), xsim against Python vectors | done: bit-exact at 0/25/60 % AXI stalls, 0.98–0.99 beats/clk/unit |
 | 2 | Block design: 4 HP ports at ~150 MHz, bitstream, timing met | |
 | 3 | Board: random-matrix correctness + measured DDR bandwidth | |
 | 4 | Weight packer (engine format, int8 LM head) + SD card loader | |

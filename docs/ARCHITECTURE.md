@@ -71,7 +71,7 @@ cross a 4 KiB boundary.
 | Offset | Name | Meaning |
 |---|---|---|
 | 0x00 | CTRL | bit0 start (self-clearing) |
-| 0x04 | STATUS | bit0 done (sticky until next start), bit1 busy, bits[7:4] per-unit done |
+| 0x04 | STATUS | bit0 done (sticky until next start), bit1 busy, bit2 AXI error, bits[7:4] per-unit done, bits[11:8] per-unit error |
 | 0x08 | MODE | 0 = ternary, 1 = int8 |
 | 0x0C | K | input length in elements |
 | 0x10 | ROWS | rows per unit (R) |

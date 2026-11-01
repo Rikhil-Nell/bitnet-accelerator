@@ -4,9 +4,11 @@ COM    ?= COM4
 PS     := powershell -NoProfile
 ENV    := . '$(CURDIR)/tools/setup/env.ps1';
 
-.PHONY: help check-ftdi list-hw program run-ps generate-emulated bitnet-cpp-build
+.PHONY: help sim check-ftdi list-hw program run-ps generate-emulated bitnet-cpp-build
 
 help:
+	@echo "Engine"
+	@echo "  sim [STALL=25]      xsim gemv_top vs NumPy vectors (random AXI stalls)"
 	@echo "Board / JTAG"
 	@echo "  check-ftdi          FTDI bus/port driver versions match (guards all JTAG targets)"
 	@echo "  list-hw             list JTAG targets"
@@ -15,6 +17,9 @@ help:
 	@echo "Model"
 	@echo "  generate-emulated PROMPT=...   reference generation on the PC (NumPy)"
 	@echo "  bitnet-cpp-build    build Microsoft bitnet.cpp (reference)"
+
+sim:
+	$(PS) -File fpga/scripts/sim_gemv.ps1 -Stall $(if $(STALL),$(STALL),25)
 
 check-ftdi:
 	$(PS) -File tools/setup/check_ftdi_drivers.ps1
