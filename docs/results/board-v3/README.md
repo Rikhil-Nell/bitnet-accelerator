@@ -32,6 +32,13 @@ Speculation is exact: with guessing switched off ('N') the same pass gives the s
 | Romeo and Juliet (48) | 1.27 | 207.2 | 184.5 | 22.7 | 163 |
 | Romeo and Juliet, no guessing | 1.00 | 200.6 | 183.3 | 17.3 | 201 |
 
+## Second USB port, weights on the SD card
+
+Same limit on the other port: France at 100 MHz measured **121 ms/token (8.25 tok/s,
+1.40 tokens/pass)**; "How many legs does a spider have?" 159 ms/token (1.06 tokens/pass);
+111 MHz resets the board, and 100 MHz reset it once during a longer answer. The Zybo's
+USB power input cannot feed full-rate streaming; a 5 V barrel supply is required.
+
 ## Projection to 142.857 MHz (5 V supply)
 
 The stream becomes 490 MB / 4.05 GB/s = 121 ms (measured bandwidth at full clock, engine
