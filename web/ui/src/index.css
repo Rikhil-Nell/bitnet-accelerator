@@ -80,13 +80,14 @@ code, kbd { font-family: var(--mono); font-size: 0.9em; background: var(--code-b
 .article .kicker { text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.78rem; color: var(--accent); font-weight: 700; }
 .article blockquote { margin: 1.4em 0; padding: 0.6em 1em; border-left: 3px solid var(--accent); background: var(--surface-2); border-radius: 0 var(--radius) var(--radius) 0; }
 
-.wide { width: min(1000px, calc(100vw - 32px)); margin-left: 50%; transform: translateX(-50%); }
+.figure.wide, .wide { width: min(1000px, calc(100vw - 32px)); margin-left: 50%; margin-right: 0; transform: translateX(-50%); }
 
 .figure { margin: 2em 0; padding: 18px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
 .figure figcaption { font-size: 0.9rem; color: var(--muted); margin-top: 10px; }
 .figure svg { display: block; width: 100%; height: auto; }
-.figure svg text { font-family: var(--sans); fill: var(--text); }
-.figure svg .muted { fill: var(--muted); }
+svg text { font-family: var(--sans); }
+svg text:not([fill]) { fill: var(--text); }
+svg text.muted:not([fill]) { fill: var(--muted); }
 
 .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 1.6em 0; }
 .stat { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; }

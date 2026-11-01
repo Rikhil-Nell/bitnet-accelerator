@@ -57,7 +57,7 @@ function TernaryFig() {
   const xs = [37, -12, 85, 4, -66];
   const ws = [1, 0, -1, 1, 0];
   return (
-    <svg viewBox="0 0 820 170" role="img" aria-label="With ternary weights a dot product is only additions and subtractions">
+    <svg viewBox="0 0 820 176" role="img" aria-label="With ternary weights a dot product is only additions and subtractions">
       <text x="0" y="20" font-weight="600" font-size="13">activations x (int8)</text>
       <text x="0" y="78" font-weight="600" font-size="13">weights w ∈ {"{-1, 0, +1}"}</text>
       <For each={xs}>{(x, i) => {
@@ -74,15 +74,16 @@ function TernaryFig() {
         );
       }}</For>
       <text x="0" y="116" font-weight="600" font-size="13">what the hardware does</text>
-      <text x="0" y="156" font-size="13">y = 37 − 85 + 4 = <tspan font-weight="700">−44</tspan>: no multipliers. One 64-bit word carries 40 weights (5 per byte, base 3), so a 40-input adder tree per unit consumes one word every clock.</text>
+      <text x="0" y="148" font-size="13">y = 37 − 85 + 4 = <tspan font-weight="700">−44</tspan>: no multipliers. One 64-bit word carries 40 weights (5 per byte, base 3),</text>
+      <text x="0" y="166" font-size="13">so a 40-input adder tree per unit consumes one word every clock.</text>
     </svg>
   );
 }
 
 function Pipeline() {
   const st = [
-    ["AXI3 HP port", "16-beat bursts, 8 in flight"],
-    ["512-deep FIFO", "credit-based, never stalls DDR"],
+    ["AXI3 HP port", "16-beat bursts"],
+    ["512-deep FIFO", "never stalls DDR"],
     ["T5 decode", "8 bytes → 40 weights"],
     ["40 lanes", "+x, −x or 0"],
     ["adder tree", "40 → 10 → 5 → 1"],
@@ -185,8 +186,8 @@ export default function Writeup() {
       <h2>1. What a language model actually computes</h2>
       <p>
         Forget the mystique: an LLM is a fixed pipeline of arithmetic. Text is cut into <em>tokens</em> (word pieces,
-        here from a vocabulary of {model.vocab.toLocaleString()}). Each token id selects a row of a table, giving a
-        vector of {model.hidden.toLocaleString()} numbers. That vector passes through {model.layers} identical
+        here from a vocabulary of {model.vocab.toLocaleString("en-US")}). Each token id selects a row of a table, giving a
+        vector of {model.hidden.toLocaleString("en-US")} numbers. That vector passes through {model.layers} identical
         layers. At the end, a final matrix (the <em>LM head</em>) gives one score per vocabulary entry, and the
         highest score is the next token. The new token is fed back in, and the loop repeats.
       </p>
