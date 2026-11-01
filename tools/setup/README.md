@@ -59,17 +59,6 @@ vivado -version
 1. [Ross downloads](https://www.amd.com/en/support/downloads/ross-agentic-ai.html) — install **Vivado AI Extension (.vsix)** in Cursor **or** standalone **vivado-mcp-server** exe.
 2. Copy/link skills from `D:\xilinx-tools\ross-ai-assistant` per AMD README.
 
-## Step 5 — Agent sim loop (no Vivado)
+## Step 5 — Simulation
 
-From repo root:
-
-```powershell
-make sim-decoder   # requires Icarus Verilog (`iverilog` in PATH)
-```
-
-Install Icarus (Admin): `choco install iverilog -y`  
-Or Scoop: `scoop install iverilog`
-
-## Bitstream note
-
-Current RTL under `bitnet-fpga-accelerator/rtl/des/` is **not a complete FPGA top** (no Zynq PS7 block design, no pin constraints). Bitstream generation requires `fpga/` integration (next implementation step).
+RTL testbenches run in Vivado xsim through `make sim`; Icarus is not needed.

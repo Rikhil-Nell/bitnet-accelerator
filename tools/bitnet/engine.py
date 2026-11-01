@@ -143,7 +143,7 @@ class BitNetEngine:
         group = nh // nkv
         x = m.tok_embd[np.array(tokens)].astype(np.float32)
 
-        verbose = getattr(self.backend, "name", "") == "zybo-pl"
+        verbose = getattr(self.backend, "verbose", False)
         for i, L in enumerate(m.layers):
             if verbose:
                 print(f"[layer {i}/{m.n_layer}] T={T} bitlinear...", flush=True)

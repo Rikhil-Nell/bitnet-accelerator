@@ -41,20 +41,28 @@ D:\src\BitNet\build\bin\Release\llama-cli.exe -m C:\AI\models\BitNet-b1.58-2B-4T
   -p "What is the capital of France?" -n 20 -t 8 -ngl 0
 ```
 
-Evidence log: `build/bitnet/bitnet_cpp_france_nocnv.log` (mentions Paris).
+The reference reply to the France prompt mentions Paris.
 
-## Capstone repo hooks
+## Local patches
+
+The fixes needed to build on this machine (I2_S quantize/dequantize in
+`ggml-quants.c`, a CPU-backend guard in the LUT transform, `llama-cli`-only build)
+are saved in `tools/setup/bitnet-cpp-patches/`, with the base commits in
+`BASE_COMMITS.txt`. To re-apply them to a fresh clone:
+
+```powershell
+cd D:\src\BitNet; git apply <repo>\tools\setup\bitnet-cpp-patches\bitnet.patch
+cd 3rdparty\llama.cpp; git apply <repo>\tools\setup\bitnet-cpp-patches\llama.cpp.patch
+```
+
+## Repo hooks
 
 | Env | Purpose |
 |-----|---------|
-| `BITNET_CPP_ROOT` | Path to BitNet clone (default `D:/src/BitNet`) |
-| `BITNET_MODEL_DIR` | HF model directory |
+| `BITNET_CPP_ROOT` | BitNet clone (default `D:/src/BitNet`); also supplies `gguf-py` |
+| `BITNET_HF_DIR` | HF model dir with `tokenizer.json` |
 | `BITNET_GGUF` | Path to `ggml-model-i2_s.gguf` |
 
-| Command | What |
-|---------|------|
-| `make test-bitnet-smoke` | Runs `run_inference.py` if clone + GGUF exist |
-| `python tools/host/extract_bitlinear_slice.py` | 8×8 slice → JSON for FPGA kernel |
-| `make test-bitnet-layer` | Kernel vs slice JSON |
-
-**Encoding:** capstone RTL ≠ Microsoft I2_S block layout in GGUF. Use `extract_bitlinear_slice.py` (safetensors) for FPGA-aligned weights; use `i2s_word_to_capstone_word` only for nibble remap.
+`make generate-emulated PROMPT="..."` runs the NumPy reference model
+(`tools/bitnet/engine.py`). It matches bitnet.cpp's I2_S unpacking and int8
+activation quantization, and answers "The capital of France is Paris."

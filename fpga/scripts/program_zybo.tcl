@@ -1,9 +1,5 @@
-# Program bitstream to first connected target (Zybo via hw_server).
-set bit_staged {D:/xilinx-tools/bitnet_zybo.bit}
+# Program the bitstream from the last `make bitstream` onto the Zybo's xc7z010.
 set bit [file normalize [file join [info script] .. .. .. build vivado bitnet_zybo.bit]]
-if {[file exists $bit_staged]} {
-  set bit [file normalize $bit_staged]
-}
 if {![file exists $bit]} {
   error "Bitstream not found: $bit (run make bitstream first)"
 }

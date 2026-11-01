@@ -3,33 +3,28 @@ description: Zybo Z7-10 Vivado/Vitis agent workflow for BitNet accelerator
 alwaysApply: true
 ---
 
-# FPGA / Zynq agent rules (BitNet capstone)
+# FPGA / Zynq agent rules (BitNet on Zybo)
+
+Design reference: `docs/ARCHITECTURE.md`. Status: `STATUS.md`.
 
 ## Board and part
 
-- Board: **Digilent Zybo Z7-10**
-- Part: `xc7z010clg400-1`
-- Board part: `digilentinc.com:zybo-z7-10:part0:1.2`
+- Board: **Digilent Zybo Z7-10**, part `xc7z010clg400-1`, board part `digilentinc.com:zybo-z7-10:part0:1.2`
 - Board repo: `D:\xilinx-tools\vivado-boards\new\board_files`
 
 ## Toolchain
 
-- Install root: **`D:\Xilinx`** (no spaces). Source `tools/setup/env.ps1` before **every** Vivado/Vitis command in a new shell.
-- Prefer **2025.1 / 2025.1.1** unless the user explicitly standardizes on 2026.1.
-- **Never use `xsct`** on 2026.x; use Vitis **Python API** and **Python XSDB** for Zynq run/debug.
-- If a required AMD/doc URL cannot be fetched, **stop and ask the user** — do not guess installer steps.
+- Vivado/Vitis **2026.1** in `D:\Xilinx`. Source `tools/setup/env.ps1` before every Vivado command in a new shell.
+- **Never use `xsct`** on 2026.x; use the Vitis **Python API** and **XSDB** (`tools/setup/run_ps_xsdb.ps1`).
 
 ## Build discipline
 
-- **Sim first:** `make sim-*` (Icarus) or Vivado xsim before synthesis when RTL changes.
-- **Scripts over GUI:** `vivado -mode batch -source ...` / Makefile targets; do not hand-edit `*.runs/` or generated Vivado project cruft in git.
-- **NumPy / reference model is golden** for ternary MAC and layer outputs unless the user changes encoding.
-- Ternary encoding in this repo: `00=0`, `01=+1`, `10=-1` — align any BitNet weight import explicitly.
+- Simulate (`make sim`, Vivado xsim) before synthesis whenever RTL changes.
+- Scripts over GUI; never commit generated Vivado/Vitis output (`build/` is ignored).
+- `tools/bitnet/engine.py` is the golden model for every layer output.
+- Ternary encoding for the engine: signed 2-bit, `00`=0, `01`=+1, `11`=−1, 32 trits per 64-bit word, row-major.
 
 ## Hardware safety
 
-- If the board is unresponsive after **one** software reset during debug, **stop** and ask the user to **power-cycle** — do not loop JTAG resets.
-
-## Scope
-
-- Current `bitnet_accelerator` RTL has **no AXI top** and **no Zynq BD** — bitstream requires `fpga/` wrapper work; do not claim bitstream-ready until that exists.
+- `make check-ftdi` must pass before any JTAG access (mismatched FTDI drivers bluescreened this PC).
+- If the board is unresponsive after **one** software reset, stop and ask the user to power-cycle.

@@ -44,13 +44,6 @@ If the versions still differ, remove the stale 2017 packages from an admin shell
 
 To analyse a crash dump yourself, install WinDbg (`winget install Microsoft.WinDbg`), copy the dump out of `C:\Windows\Minidump` (this needs admin), and run `cdb -z <dmp> -c "!analyze -v; q"`.
 
-Host-only audit without launching Vivado:
-
-```powershell
-$env:CAPSTONE_SKIP_JTAG_PROBE = "1"
-make capstone-check
-```
-
 ## Steps
 
 1. **Cable:** Zybo **PROG/UART** micro-USB (not a UART-only cable on a wrong port).
@@ -61,19 +54,17 @@ make capstone-check
    - Install [Digilent Adept](https://digilent.com/reference/software/adept/start) (Digilent USB Device driver)
    - **Full reboot** (verify `LastBootUpTime` changed), replug PROG USB
    - Try another USB port/cable; disable USB selective suspend
-5. **UART vs JTAG:** Converter **A** (OK) is often **COMx** for serial (`make uart-listen COM=COMx`); **B** must be healthy for Vivado JTAG.
+5. **UART vs JTAG:** Converter **A** (OK) is often **COMx** for serial (COM4 on this PC); **B** must be healthy for Vivado JTAG.
 6. **Single session:** Close other Vivado / hw_server instances.
 7. **Probe:** `make list-hw` — should print a non-empty target list.
 8. **Program PL:** `make program` → `build/vivado/bitnet_zybo.bit`
-9. **Run PS app:** Vitis workspace `D:\xilinx-tools\bitnet_vitis_ws_clean`, run `system_8x8_test.elf`, then `make uart-listen COM=COMx`.
+9. **Run PS app:** `make run-ps ELF=<path to .elf>`. Open the COM port *before* running if the app prints only once.
 
-**Automated PL program (after step 7 works):**
-
-```powershell
-. tools/setup/board_bringup.ps1 -Com COMx
-```
-
-(`djtgcfg` from Digilent Adept is optional; Vivado `make program` + `make run-ps` are the supported paths.)
+**Bring-up order that works:** `make check-ftdi` → `make program` → `make run-ps ELF=...`.
+The run script calls `ps7_post_config` after `ps7_init`; without it the PS→PL level
+shifters stay off and the first AXI access to the fabric hangs the A9. If XSDB reports
+"Cannot halt processor core", power-cycle the board (switch off, 5 s, on) instead of
+looping JTAG resets.
 
 **Note (Windows):** Full `settings64.bat` can exceed PATH length; `make run-ps` uses `tools/setup/run_ps_xsdb.ps1` (minimal PATH + `TCL_LIBRARY`).
 

@@ -2,7 +2,6 @@
 """Generate a reply from BitNet b1.58 2B-4T with BitLinear on a chosen accelerator backend.
 
   python tools/bitnet/generate.py -p "What is the capital of France?" -n 20
-  python tools/bitnet/generate.py -p "..." --backend board --port COM4
 """
 
 from __future__ import annotations
@@ -33,12 +32,10 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("-p", "--prompt", required=True)
     ap.add_argument("-n", "--max-tokens", type=int, default=20)
-    ap.add_argument("--backend", choices=["emulated", "board"], default="emulated")
-    ap.add_argument("--port", default="COM4")
+    ap.add_argument("--backend", choices=["emulated"], default="emulated")
     ap.add_argument("--gguf", type=Path, default=DEFAULT_GGUF)
     ap.add_argument("--layers", type=int, default=None, help="debug: run only the first N layers")
     ap.add_argument("--log", type=Path, default=None, help="write a JSON record of the run")
-    ap.add_argument("--fast", action="store_true", help="board: skip verify, weight checksum, output checksum")
     args = ap.parse_args()
 
     from tokenizers import Tokenizer
@@ -48,19 +45,7 @@ def main() -> int:
 
     t0 = time.perf_counter()
     model = load_model(args.gguf, n_layer_limit=args.layers)
-    if args.backend == "board":
-        from board_backend import BoardAccelerator
-
-        backend = BoardAccelerator(
-            model,
-            port=args.port,
-            verify=not args.fast,
-            check_weights=not args.fast,
-            fuse_ffn=True,
-            checksum_out=not args.fast,
-        )
-    else:
-        backend = EmulatedAccelerator(model)
+    backend = EmulatedAccelerator(model)
     eng = BitNetEngine(model, backend)
     print(f"[load] {time.perf_counter() - t0:.1f}s  backend={backend.name}  prompt_tokens={len(ids)}", flush=True)
 

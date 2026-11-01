@@ -1,63 +1,47 @@
-# BitNet Zybo accelerator (capstone)
+# BitNet b1.58 on a Zybo Z7-10
 
-FPGA **W2A8 BitLinear** engine for **Digilent Zybo Z7-10** (`xc7z010`), with PC-side golden kernel and Zynq bring-up.
+Running Microsoft's **BitNet b1.58 2B-4T** on a Digilent Zybo Z7-10 (Zynq-7010,
+1 GB DDR3L), with the ternary matrix work in the FPGA fabric and everything else
+on the ARM cores. Target: **≥ 2 tokens/s**.
 
-## Quick commands
+Design and reasoning: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+Where things stand: [`STATUS.md`](STATUS.md).
 
-Source Vivado once per shell:
+## Layout
 
-```powershell
-. tools/setup/env.ps1
-```
+| Path | What |
+|---|---|
+| `rtl/` | Streaming GEMV engine (Verilog) and its testbenches |
+| `fpga/scripts/` | Vivado block design / bitstream, Vitis app build, JTAG program and run |
+| `fpga/ps/` | Bare-metal PS applications |
+| `tools/bitnet/` | Python reference model (golden), weight packer, generation CLI |
+| `tools/setup/` | Toolchain environment, FTDI driver check, bitnet.cpp build + patches |
+| `docs/` | Architecture, JTAG troubleshooting, PC reference inference, results |
 
-| Target | Purpose |
-|--------|---------|
-| `make capstone-check` | Status matrix (host + artifacts; JTAG/board) |
-| `make eval` | Golden L0 tests |
-| `make test-kernel` | PC BitLinear == golden (+ NumPy reference) |
-| `make test-mmio` | CSR/MMIO flow for `system_8x8.json` |
-| `make vivado-synth` | RTL-only synth sanity (no BD) |
-| `make bitstream` | Zynq BD + `build/vivado/bitnet_zybo.bit` |
-| `make ps-app` | Vitis bare-metal `system_8x8_test.elf` |
-| `make ps-app-rebuild` | Sync PS sources + rebuild (platform already built) |
-| `make list-hw` | JTAG diagnostic |
-| `make program` | JTAG program `.bit` (`docs/ZYBO_JTAG.md`) |
-| `make run-ps` | XSDB download/run `system_8x8_test.elf` |
-| `make board-bringup COM=COMx` | Program PL + run PS + UART instructions |
-| `make test-bitnet-smoke` | Microsoft **bitnet.cpp** `run_inference.py` (if built) |
-| `make test-bitnet-layer` | Capstone kernel vs HF weight slice JSON |
-| `make sim-all` | RTL TB smoke (Icarus if in PATH, else Vivado **xsim**) |
-| `make uart-listen COM=COMx` | Board UART PASS line (115200) |
+The original 8×8 capstone RTL lives in its own repo,
+[CapstoneBitnet/bitnet-fpga-accelerator](https://github.com/CapstoneBitnet/bitnet-fpga-accelerator)
+(checked out locally in `bitnet-fpga-accelerator/`, ignored here). The design
+that used it is preserved at tag `baseline-8x8-uart`.
 
-Optional faster RTL sim: `choco install iverilog -y` (Admin). JTAG stuck? `. tools/setup/diagnose_zybo_usb.ps1` (Converter B `CM_PROB_NEED_RESTART` → reboot). Then `. tools/setup/board_bringup.ps1 -Com COMx`.
+## Setup
 
-## Microsoft BitNet inference (PC)
+* Vivado/Vitis 2026.1 in `D:\Xilinx`; source `tools/setup/env.ps1` in each new shell.
+* Zybo board files: `D:\xilinx-tools\vivado-boards\new\board_files`.
+* Model: `C:\AI\models\BitNet-b1.58-2B-4T-gguf\ggml-model-i2_s.gguf` and the
+  tokenizer in `C:\AI\models\BitNet-b1.58-2B-4T\`.
+* Python 3.13 with `numpy`, `tokenizers`, `pyserial`; `gguf-py` comes from the
+  bitnet.cpp clone (`BITNET_CPP_ROOT`, default `D:\src\BitNet`).
 
-Official engine: **[microsoft/BitNet](https://github.com/microsoft/BitNet)** → `ggml-model-i2_s.gguf` + `run_inference.py`.
+Run `make help` for the command list.
 
-- Guide: **`docs/BITNET_PC_INFERENCE.md`**
-- Helper: `. tools/setup/bitnet-pc.ps1`
-- Env: `BITNET_CPP_ROOT`, `BITNET_MODEL_DIR`, `BITNET_GGUF`
-- On this machine, **`C:\AI\models`** has gemma/qwen/parakeet — **BitNet weights not present yet** (download commands in the doc).
+## Board facts
 
-Extract an 8×8 FPGA-aligned slice from HF safetensors:
+| | |
+|---|---|
+| Part | `xc7z010clg400-1` |
+| Board part | `digilentinc.com:zybo-z7-10:part0:1.2` |
+| UART | COM4 on this PC |
+| Engine CSR base | `0x43C00000` |
 
-```powershell
-python tools/host/extract_bitlinear_slice.py
-make test-bitnet-layer
-```
-
-## Docs
-
-- `docs/DESIGN.md` — architecture, encoding, phases  
-- `docs/ITERATION.md` — current step  
-- `docs/CAPSTONE_BRINGUP.md` — board checklist after JTAG fix  
-- `docs/BITNET_PC_INFERENCE.md` — bitnet.cpp + weights  
-- `tools/setup/README.md` — Vivado 2026.1 on `D:\Xilinx`  
-
-## Board
-
-- Part: `xc7z010clg400-1`  
-- Board part: `digilentinc.com:zybo-z7-10:part0:1.2`  
-- Board files: `D:\xilinx-tools\vivado-boards\new\board_files`  
-- Accelerator AXI base: **`0x43C00000`** (see `docs/ITERATION.md`)
+Before any JTAG command, `make check-ftdi` must pass. Mismatched FTDI drivers
+crashed Windows twice (see `docs/ZYBO_JTAG.md`).

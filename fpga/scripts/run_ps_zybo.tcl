@@ -1,25 +1,16 @@
 # XSDB batch: init PS, optionally load a data file into DDR, download + run an ELF.
-# Env: BITNET_ELF (default system_8x8_test), BITNET_DATA + BITNET_DATA_ADDR (optional).
-set ps7_staged {D:/xilinx-tools/ps7_init.tcl}
+# Env: BITNET_ELF (path, or "skip" for data-only), BITNET_DATA + BITNET_DATA_ADDR (optional).
 set repo [file normalize [file join [info script] .. .. ..]]
-set ps7_tcl [file join $repo build bitnet_zybo bitnet_zybo.gen sources_1 bd design_1 ip \
-  design_1_processing_system7_0_0 ps7_init.tcl]
-if {[file exists $ps7_staged]} {
-  set ps7_tcl [file normalize $ps7_staged]
+set ps7_tcl [file join $repo build vivado ps7_init.tcl]
+if {![info exists ::env(BITNET_ELF)] || $::env(BITNET_ELF) eq ""} {
+  puts "ERROR: set BITNET_ELF (make run-ps ELF=path/to/app.elf)"
+  exit 1
 }
-set skip_elf 0
-set elf {D:/xilinx-tools/bitnet_vitis_ws_clean/system_8x8_test/build/system_8x8_test.elf}
-if {[info exists ::env(BITNET_ELF)] && $::env(BITNET_ELF) ne ""} {
-  if {$::env(BITNET_ELF) eq "skip"} {
-    set skip_elf 1
-  } else {
-    set elf $::env(BITNET_ELF)
-  }
-}
+set skip_elf [expr {$::env(BITNET_ELF) eq "skip"}]
 if {!$skip_elf} {
-  set elf [file normalize $elf]
+  set elf [file normalize $::env(BITNET_ELF)]
   if {![file exists $elf]} {
-    puts "ERROR: ELF not found: $elf (run make ps-app)"
+    puts "ERROR: ELF not found: $elf"
     exit 1
   }
 }
@@ -47,7 +38,7 @@ if {$apu eq ""} {
 targets -set $apu
 catch {stop}
 if {![file exists $ps7_tcl]} {
-  puts "ERROR: Missing $ps7_tcl (run make bitstream)"
+  puts "ERROR: Missing $ps7_tcl (run make bitstream; it copies ps7_init.tcl there)"
   exit 1
 }
 puts "XSDB: ps7_init from BD export"
