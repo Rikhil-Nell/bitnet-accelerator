@@ -9,7 +9,7 @@
 // mode 0 (ternary): 32 weights per beat, signed 2-bit (00=0, 01=+1, 11=-1)
 // mode 1 (int8):     8 weights per beat
 //
-// Datapath: one beat per clock, six pipeline stages, no internal stalls.
+// Datapath: one beat per clock, seven pipeline stages, no internal stalls.
 // The input FIFO is only popped while the output FIFO has room for everything
 // that could still come out of the pipeline.
 module gemv_unit (
@@ -181,16 +181,26 @@ module gemv_unit (
             ip[i] <= $signed(act_sel[8*i +: 8]) * $signed(w_r[8*i +: 8]);
     end
 
-    // ---------------- stage C: partial sums ----------------
+    // ---------------- stage C1: sums of 4 (ternary) / 2 (int8) ----------------
+    reg               vq, last_q;
+    reg signed [10:0] t4 [0:7];
+    reg signed [16:0] i2 [0:3];
+    always @(posedge clk) begin
+        for (j = 0; j < 8; j = j + 1)
+            t4[j] <= tp[4*j] + tp[4*j+1] + tp[4*j+2] + tp[4*j+3];
+        for (m = 0; m < 4; m = m + 1)
+            i2[m] <= ip[2*m] + ip[2*m+1];
+    end
+
+    // ---------------- stage C2: partial sums ----------------
     reg               vd, last_d;
     reg signed [11:0] ts [0:3];
     reg signed [17:0] is [0:1];
     always @(posedge clk) begin
         for (j = 0; j < 4; j = j + 1)
-            ts[j] <= tp[8*j] + tp[8*j+1] + tp[8*j+2] + tp[8*j+3]
-                   + tp[8*j+4] + tp[8*j+5] + tp[8*j+6] + tp[8*j+7];
+            ts[j] <= t4[2*j] + t4[2*j+1];
         for (m = 0; m < 2; m = m + 1)
-            is[m] <= ip[4*m] + ip[4*m+1] + ip[4*m+2] + ip[4*m+3];
+            is[m] <= i2[2*m] + i2[2*m+1];
     end
 
     // ---------------- stage D: beat total ----------------
@@ -209,7 +219,7 @@ module gemv_unit (
     reg [31:0]        lo;
     wire signed [31:0] acc_next = acc + beat_sum;
 
-    wire pipe_empty = !vb && !vr && !vc && !vd && !ve;
+    wire pipe_empty = !vb && !vr && !vc && !vq && !vd && !ve;
 
     always @(posedge clk) begin
         if (!rst_n) begin
@@ -230,8 +240,8 @@ module gemv_unit (
             col        <= 0;
             row        <= 0;
             popped_all <= 1'b0;
-            vb <= 0; vr <= 0; vc <= 0; vd <= 0; ve <= 0;
-            last_b <= 0; last_r <= 0; last_c <= 0; last_d <= 0; last_e <= 0;
+            vb <= 0; vr <= 0; vc <= 0; vq <= 0; vd <= 0; ve <= 0;
+            last_b <= 0; last_r <= 0; last_c <= 0; last_q <= 0; last_d <= 0; last_e <= 0;
             sel_b      <= 0;
             acc        <= 0;
             have_lo    <= 1'b0;
@@ -306,7 +316,8 @@ module gemv_unit (
             // stages B..D valid/last
             vr <= vb; last_r <= last_b;
             vc <= vr; last_c <= last_r;
-            vd <= vc; last_d <= last_c;
+            vq <= vc; last_q <= last_c;
+            vd <= vq; last_d <= last_q;
             ve <= vd; last_e <= last_d;
 
             // stage E
