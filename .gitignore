@@ -9,8 +9,6 @@ build/
 xsim.dir/
 webtalk*
 
-# Team RTL repo (separate git: github.com/CapstoneBitnet/bitnet-fpga-accelerator)
-bitnet-fpga-accelerator/
 
 # Python
 __pycache__/

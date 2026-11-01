@@ -23,9 +23,9 @@ Where things stand: [`STATUS.md`](STATUS.md).
 | `docs/` | Architecture, JTAG troubleshooting, PC reference inference, results |
 
 The original 8×8 capstone RTL lives in its own repo,
-[CapstoneBitnet/bitnet-fpga-accelerator](https://github.com/CapstoneBitnet/bitnet-fpga-accelerator)
-(checked out locally in `bitnet-fpga-accelerator/`, ignored here). The design
-that used it is preserved at tag `baseline-8x8-uart`.
+[CapstoneBitnet/bitnet-fpga-accelerator](https://github.com/CapstoneBitnet/bitnet-fpga-accelerator).
+The design that used it is preserved at tag `baseline-8x8-uart`; this repo no
+longer depends on it.
 
 ## Setup
 
