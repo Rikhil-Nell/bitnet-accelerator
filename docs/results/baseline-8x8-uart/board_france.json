@@ -1,0 +1,30 @@
+{
+  "prompt": "What is the capital of France?",
+  "backend": "zybo-pl",
+  "prompt_ids": [
+    128000,
+    1502,
+    25,
+    3639,
+    374,
+    279,
+    6864,
+    315,
+    9822,
+    30,
+    128009,
+    72803,
+    25,
+    220
+  ],
+  "output_ids": [
+    791
+  ],
+  "output_text": "The",
+  "step_seconds": [
+    5843.9208683,
+    519.1057515000011
+  ],
+  "bitlinear_seconds": 6362.635583799978,
+  "macs": 31260672000
+}

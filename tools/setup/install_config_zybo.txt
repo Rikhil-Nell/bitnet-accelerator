@@ -1,0 +1,17 @@
+# AMD Unified Installer batch config — Zybo Z7-10 (xc7z010), minimal footprint.
+# Install root MUST have no spaces. Adjust paths if needed.
+#
+# Usage (after web installer client is extracted):
+#   cd <installer>\bin
+#   xsetup.bat --agree XilinxEULA,3rdPartyEULA --batch Install --config D:\xilinx-tools\install_config_zybo.txt
+#
+# Generate a fresh template for your installer version:
+#   xsetup.bat --batch ConfigGen --edition "Vitis Unified Software Platform"
+
+Edition=Vitis Unified Software Platform
+Path=D:\Xilinx
+
+# Zynq-7000 only (Zybo Z7-10). Disable families you do not need in the GUI ConfigGen export.
+Modules=Vivado Design Suite:Vitis Embedded Development:DocNav
+
+Preferences=InstallDevicesForZynq7000:true

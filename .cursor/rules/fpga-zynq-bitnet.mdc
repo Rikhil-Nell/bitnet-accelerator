@@ -1,0 +1,35 @@
+---
+description: Zybo Z7-10 Vivado/Vitis agent workflow for BitNet accelerator
+alwaysApply: true
+---
+
+# FPGA / Zynq agent rules (BitNet capstone)
+
+## Board and part
+
+- Board: **Digilent Zybo Z7-10**
+- Part: `xc7z010clg400-1`
+- Board part: `digilentinc.com:zybo-z7-10:part0:1.2`
+- Board repo: `D:\xilinx-tools\vivado-boards\new\board_files`
+
+## Toolchain
+
+- Install root: **`D:\Xilinx`** (no spaces). Source `tools/setup/env.ps1` before **every** Vivado/Vitis command in a new shell.
+- Prefer **2025.1 / 2025.1.1** unless the user explicitly standardizes on 2026.1.
+- **Never use `xsct`** on 2026.x; use Vitis **Python API** and **Python XSDB** for Zynq run/debug.
+- If a required AMD/doc URL cannot be fetched, **stop and ask the user** — do not guess installer steps.
+
+## Build discipline
+
+- **Sim first:** `make sim-*` (Icarus) or Vivado xsim before synthesis when RTL changes.
+- **Scripts over GUI:** `vivado -mode batch -source ...` / Makefile targets; do not hand-edit `*.runs/` or generated Vivado project cruft in git.
+- **NumPy / reference model is golden** for ternary MAC and layer outputs unless the user changes encoding.
+- Ternary encoding in this repo: `00=0`, `01=+1`, `10=-1` — align any BitNet weight import explicitly.
+
+## Hardware safety
+
+- If the board is unresponsive after **one** software reset during debug, **stop** and ask the user to **power-cycle** — do not loop JTAG resets.
+
+## Scope
+
+- Current `bitnet_accelerator` RTL has **no AXI top** and **no Zynq BD** — bitstream requires `fpga/` wrapper work; do not claim bitstream-ready until that exists.
