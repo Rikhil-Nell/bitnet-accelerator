@@ -2,30 +2,40 @@
 // One GEMV unit: y[r] = sum_k W[r][k] * x[k] for its slice of rows, on one HP port.
 //
 // Command flow:
-//   1. read x (K int8 bytes, K/8 beats) into the activation buffer
-//   2. stream W row-major and accumulate one row at a time
+//   1. read x (x_beats x 8 int8 bytes) into the activation buffer
+//   2. stream W row-major (row_beats beats per row) and accumulate one row at a time
 //   3. write one int32 per row to y (two rows per 64-bit beat)
 //
-// mode 0 (ternary): 32 weights per beat, signed 2-bit (00=0, 01=+1, 11=-1)
-// mode 1 (int8):     8 weights per beat
+// mode 0 (ternary, "T5"): 40 weights per beat, 5 per byte in base 3 (rtl/t5_decode.v),
+//                         x_beats = 5 * row_beats (K padded to a multiple of 40)
+// mode 1 (int8):          8 weights per beat, row_beats = x_beats
 //
-// Datapath: one beat per clock, seven pipeline stages, no internal stalls.
-// The input FIFO is only popped while the output FIFO has room for everything
-// that could still come out of the pipeline.
+// Activation buffer: 5 banks x 256 x 64 bit. x beat j lives in bank j % 5 at address
+// j / 5, so one address read gives the 40 activations of a T5 beat, and an int8 beat
+// reads one bank.
+//
+// Datapath: one beat per clock, eight pipeline stages, no internal stalls. The input
+// FIFO is only popped while the output FIFO has room for everything that could
+// still come out of the pipeline.
+//
+// progress: write bursts acknowledged for the current command. Every burst but the
+// last is 16 beats = 32 rows, so rows [0, 32 * progress) of this unit are in DDR.
 module gemv_unit (
     input  wire        clk,
     input  wire        rstn,
 
     input  wire        start,
     input  wire        mode,
-    input  wire [15:0] k,        // multiple of 32, <= 8192
-    input  wire [15:0] rows,     // even, >= 2
+    input  wire [10:0] x_beats,   // K / 8, <= 1280
+    input  wire [12:0] row_beats, // beats per weight row, >= 1
+    input  wire [15:0] rows,      // even, >= 2
     input  wire [31:0] x_addr,
     input  wire [31:0] w_addr,
     input  wire [31:0] y_addr,
-    output reg         done,     // sticky until next start
+    output reg         done,      // sticky until next start
     output wire        busy,
     output wire        err,
+    output wire [15:0] progress,
 
     // AXI3 master (HP port)
     output wire [31:0] araddr,
@@ -58,8 +68,8 @@ module gemv_unit (
     reg [2:0]  state;
     reg        mode_q;
     reg [15:0] rows_q;
-    reg [12:0] row_beats;      // beats per weight row
-    reg [10:0] act_beats;      // K/8
+    reg [12:0] row_beats_q;
+    reg [10:0] act_beats;
     reg [31:0] w_addr_q;
 
     // ---------------- read / write masters ----------------
@@ -89,7 +99,7 @@ module gemv_unit (
     axi3_wr u_wr (
         .clk(clk), .rstn(rst_n),
         .cmd_valid(wr_cmd), .cmd_addr(y_addr), .cmd_beats({13'd0, rows[15:1]}),
-        .idle(wr_idle), .err(wr_err),
+        .idle(wr_idle), .err(wr_err), .bursts_done(progress),
         .push(out_push), .din(out_word), .fifo_count(out_cnt),
         .awaddr(awaddr), .awlen(awlen), .awvalid(awvalid), .awready(awready),
         .wdata(wdata), .wlast(wlast), .wvalid(wvalid), .wready(wready),
@@ -99,24 +109,27 @@ module gemv_unit (
     assign err  = rd_err | wr_err;
     assign busy = (state != S_IDLE);
 
-    // ---------------- activation buffer: 4 banks x 256 x 64 bit ----------------
+    // ---------------- activation buffer: 5 banks x 256 x 64 bit ----------------
     reg        act_we;
-    reg [9:0]  act_widx;       // 8-byte group index being written
+    reg [2:0]  wbank;          // bank of the next x beat to store
+    reg [7:0]  waddr;
     reg [7:0]  act_raddr;
     reg        act_re;
     (* ram_style = "block" *) reg [63:0] bank0 [0:255];
     (* ram_style = "block" *) reg [63:0] bank1 [0:255];
     (* ram_style = "block" *) reg [63:0] bank2 [0:255];
     (* ram_style = "block" *) reg [63:0] bank3 [0:255];
-    reg [63:0] a0, a1, a2, a3;
+    (* ram_style = "block" *) reg [63:0] bank4 [0:255];
+    reg [63:0] a0, a1, a2, a3, a4;
 
     always @(posedge clk) begin
         if (act_we) begin
-            case (act_widx[1:0])
-                2'd0: bank0[act_widx[9:2]] <= fifo_dout;
-                2'd1: bank1[act_widx[9:2]] <= fifo_dout;
-                2'd2: bank2[act_widx[9:2]] <= fifo_dout;
-                2'd3: bank3[act_widx[9:2]] <= fifo_dout;
+            case (wbank)
+                3'd0: bank0[waddr] <= fifo_dout;
+                3'd1: bank1[waddr] <= fifo_dout;
+                3'd2: bank2[waddr] <= fifo_dout;
+                3'd3: bank3[waddr] <= fifo_dout;
+                default: bank4[waddr] <= fifo_dout;
             endcase
         end
         if (act_re) begin
@@ -124,6 +137,7 @@ module gemv_unit (
             a1 <= bank1[act_raddr];
             a2 <= bank2[act_raddr];
             a3 <= bank3[act_raddr];
+            a4 <= bank4[act_raddr];
         end
     end
 
@@ -131,62 +145,87 @@ module gemv_unit (
     reg [12:0] col;
     reg [15:0] row;
     reg        popped_all;
-    reg [10:0] act_cnt;        // groups popped during S_ACT
+    reg [10:0] act_cnt;        // x beats popped during S_ACT
+    reg [2:0]  ibank;          // int8: bank of the current beat
+    reg [7:0]  iaddr;          // int8: address of the current beat
 
     reg        vb, last_b;
-    reg [1:0]  sel_b;
+    reg [2:0]  sel_b;
 
-    // Room check: at most 4 rows can be in flight in stages B..E plus the pair register.
+    // Room check: at most a few rows can be in flight in stages B..E plus the pair register.
     wire out_room = (out_cnt <= 6'd24);
     wire run_pop  = (state == S_RUN) && !popped_all && !fifo_empty && out_room;
     wire act_pop  = (state == S_ACT) && (act_cnt != act_beats) && !fifo_empty;
+    wire row_end  = (col == row_beats_q - 1'b1);
 
     always @(*) begin
         fifo_rd   = run_pop | act_pop;
         act_re    = run_pop;
-        act_raddr = mode_q ? col[9:2] : col[7:0];
+        act_raddr = mode_q ? iaddr : col[7:0];
     end
 
     // ---------------- stage R: register BRAM / FIFO outputs ----------------
     reg         vr, last_r;
+    reg [2:0]   sel_r;
     reg [63:0]  w_r;
-    reg [255:0] act_word;
+    reg [319:0] act_r;
+    always @(posedge clk) begin
+        w_r   <= fifo_dout;
+        act_r <= {a4, a3, a2, a1, a0};
+        sel_r <= sel_b;
+    end
+
+    // ---------------- stage T: T5 decode, int8 operand select ----------------
+    wire [79:0] codes;
+    genvar gb;
+    generate
+        for (gb = 0; gb < 8; gb = gb + 1) begin : g_dec
+            t5_decode u_dec (.b(w_r[8*gb +: 8]), .c(codes[10*gb +: 10]));
+        end
+    endgenerate
+
+    reg         vt, last_t;
+    reg [79:0]  codes_t;
+    reg [319:0] act_t;
+    reg [63:0]  w_t;
     reg [63:0]  act_sel;
     always @(posedge clk) begin
-        w_r      <= fifo_dout;
-        act_word <= {a3, a2, a1, a0};
-        case (sel_b)
-            2'd0: act_sel <= a0;
-            2'd1: act_sel <= a1;
-            2'd2: act_sel <= a2;
-            default: act_sel <= a3;
+        codes_t <= codes;
+        act_t   <= act_r;
+        w_t     <= w_r;
+        case (sel_r)
+            3'd0: act_sel <= act_r[63:0];
+            3'd1: act_sel <= act_r[127:64];
+            3'd2: act_sel <= act_r[191:128];
+            3'd3: act_sel <= act_r[255:192];
+            default: act_sel <= act_r[319:256];
         endcase
     end
 
     // ---------------- stage B: products ----------------
     reg               vc, last_c;
-    reg signed [8:0]  tp [0:31];
+    reg signed [8:0]  tp [0:39];
     (* use_dsp = "yes" *) reg signed [15:0] ip [0:7];
     integer i, j, m;
 
     always @(posedge clk) begin
-        for (i = 0; i < 32; i = i + 1) begin
-            case (w_r[2*i +: 2])
-                2'b01:   tp[i] <=  $signed({act_word[8*i+7], act_word[8*i +: 8]});
-                2'b11:   tp[i] <= -$signed({act_word[8*i+7], act_word[8*i +: 8]});
+        for (i = 0; i < 40; i = i + 1) begin
+            case (codes_t[2*i +: 2])
+                2'b01:   tp[i] <=  $signed({act_t[8*i+7], act_t[8*i +: 8]});
+                2'b11:   tp[i] <= -$signed({act_t[8*i+7], act_t[8*i +: 8]});
                 default: tp[i] <= 9'sd0;
             endcase
         end
         for (i = 0; i < 8; i = i + 1)
-            ip[i] <= $signed(act_sel[8*i +: 8]) * $signed(w_r[8*i +: 8]);
+            ip[i] <= $signed(act_sel[8*i +: 8]) * $signed(w_t[8*i +: 8]);
     end
 
     // ---------------- stage C1: sums of 4 (ternary) / 2 (int8) ----------------
     reg               vq, last_q;
-    reg signed [10:0] t4 [0:7];
+    reg signed [10:0] t4 [0:9];
     reg signed [16:0] i2 [0:3];
     always @(posedge clk) begin
-        for (j = 0; j < 8; j = j + 1)
+        for (j = 0; j < 10; j = j + 1)
             t4[j] <= tp[4*j] + tp[4*j+1] + tp[4*j+2] + tp[4*j+3];
         for (m = 0; m < 4; m = m + 1)
             i2[m] <= ip[2*m] + ip[2*m+1];
@@ -194,10 +233,10 @@ module gemv_unit (
 
     // ---------------- stage C2: partial sums ----------------
     reg               vd, last_d;
-    reg signed [11:0] ts [0:3];
+    reg signed [11:0] ts [0:4];
     reg signed [17:0] is [0:1];
     always @(posedge clk) begin
-        for (j = 0; j < 4; j = j + 1)
+        for (j = 0; j < 5; j = j + 1)
             ts[j] <= t4[2*j] + t4[2*j+1];
         for (m = 0; m < 2; m = m + 1)
             is[m] <= i2[2*m] + i2[2*m+1];
@@ -210,7 +249,7 @@ module gemv_unit (
         if (mode_q)
             beat_sum <= is[0] + is[1];
         else
-            beat_sum <= ts[0] + ts[1] + ts[2] + ts[3];
+            beat_sum <= ts[0] + ts[1] + ts[2] + ts[3] + ts[4];
     end
 
     // ---------------- stage E: accumulate, emit rows in pairs ----------------
@@ -219,7 +258,7 @@ module gemv_unit (
     reg [31:0]        lo;
     wire signed [31:0] acc_next = acc + beat_sum;
 
-    wire pipe_empty = !vb && !vr && !vc && !vq && !vd && !ve;
+    wire pipe_empty = !vb && !vr && !vt && !vc && !vq && !vd && !ve;
 
     always @(posedge clk) begin
         if (!rst_n) begin
@@ -227,7 +266,7 @@ module gemv_unit (
             done       <= 1'b0;
             mode_q     <= 1'b0;
             rows_q     <= 0;
-            row_beats  <= 0;
+            row_beats_q <= 0;
             act_beats  <= 0;
             w_addr_q   <= 0;
             rd_cmd     <= 1'b0;
@@ -235,13 +274,16 @@ module gemv_unit (
             rd_beats   <= 0;
             wr_cmd     <= 1'b0;
             act_we     <= 1'b0;
-            act_widx   <= 0;
+            wbank      <= 0;
+            waddr      <= 0;
             act_cnt    <= 0;
             col        <= 0;
             row        <= 0;
+            ibank      <= 0;
+            iaddr      <= 0;
             popped_all <= 1'b0;
-            vb <= 0; vr <= 0; vc <= 0; vq <= 0; vd <= 0; ve <= 0;
-            last_b <= 0; last_r <= 0; last_c <= 0; last_q <= 0; last_d <= 0; last_e <= 0;
+            vb <= 0; vr <= 0; vt <= 0; vc <= 0; vq <= 0; vd <= 0; ve <= 0;
+            last_b <= 0; last_r <= 0; last_t <= 0; last_c <= 0; last_q <= 0; last_d <= 0; last_e <= 0;
             sel_b      <= 0;
             acc        <= 0;
             have_lo    <= 1'b0;
@@ -255,35 +297,45 @@ module gemv_unit (
 
             // activation write happens the cycle after the pop (FIFO latency)
             act_we <= act_pop;
-            if (act_we) act_widx <= act_widx + 1'b1;
+            if (act_we) begin
+                if (wbank == 3'd4) begin
+                    wbank <= 0;
+                    waddr <= waddr + 1'b1;
+                end else begin
+                    wbank <= wbank + 1'b1;
+                end
+            end
 
             case (state)
                 S_IDLE: if (start) begin
-                    done      <= 1'b0;
-                    mode_q    <= mode;
-                    rows_q    <= rows;
-                    row_beats <= mode ? k[15:3] : {2'b00, k[15:5]};
-                    act_beats <= k[13:3];
-                    w_addr_q  <= w_addr;
-                    rd_addr   <= x_addr;
-                    rd_beats  <= {17'd0, k[13:3]};
-                    rd_cmd    <= 1'b1;
-                    wr_cmd    <= 1'b1;
-                    act_cnt   <= 0;
-                    act_widx  <= 0;
-                    col       <= 0;
-                    row       <= 0;
-                    popped_all <= 1'b0;
-                    acc       <= 0;
-                    have_lo   <= 1'b0;
-                    state     <= S_ACT;
+                    done        <= 1'b0;
+                    mode_q      <= mode;
+                    rows_q      <= rows;
+                    row_beats_q <= row_beats;
+                    act_beats   <= x_beats;
+                    w_addr_q    <= w_addr;
+                    rd_addr     <= x_addr;
+                    rd_beats    <= {17'd0, x_beats};
+                    rd_cmd      <= 1'b1;
+                    wr_cmd      <= 1'b1;
+                    act_cnt     <= 0;
+                    wbank       <= 0;
+                    waddr       <= 0;
+                    col         <= 0;
+                    row         <= 0;
+                    ibank       <= 0;
+                    iaddr       <= 0;
+                    popped_all  <= 1'b0;
+                    acc         <= 0;
+                    have_lo     <= 1'b0;
+                    state       <= S_ACT;
                 end
                 S_ACT: begin
                     if (act_pop) act_cnt <= act_cnt + 1'b1;
-                    // all groups popped and the last write has landed
+                    // all x beats popped and the last write has landed
                     if (act_cnt == act_beats && !act_we && rd_idle && !rd_cmd) begin
                         rd_addr  <= w_addr_q;
-                        rd_beats <= rows_q * row_beats;
+                        rd_beats <= rows_q * row_beats_q;
                         rd_cmd   <= 1'b1;
                         state    <= S_WREQ;
                     end
@@ -303,19 +355,28 @@ module gemv_unit (
             // stage A
             vb <= run_pop;
             if (run_pop) begin
-                sel_b  <= col[1:0];
-                last_b <= (col == row_beats - 1'b1);
-                if (col == row_beats - 1'b1) begin
-                    col <= 0;
-                    row <= row + 1'b1;
+                sel_b  <= ibank;
+                last_b <= row_end;
+                if (row_end) begin
+                    col   <= 0;
+                    ibank <= 0;
+                    iaddr <= 0;
+                    row   <= row + 1'b1;
                     if (row == rows_q - 1'b1) popped_all <= 1'b1;
                 end else begin
                     col <= col + 1'b1;
+                    if (ibank == 3'd4) begin
+                        ibank <= 0;
+                        iaddr <= iaddr + 1'b1;
+                    end else begin
+                        ibank <= ibank + 1'b1;
+                    end
                 end
             end
-            // stages B..D valid/last
+            // stages R..D valid/last
             vr <= vb; last_r <= last_b;
-            vc <= vr; last_c <= last_r;
+            vt <= vr; last_t <= last_r;
+            vc <= vt; last_c <= last_t;
             vq <= vc; last_q <= last_c;
             vd <= vq; last_d <= last_q;
             ve <= vd; last_e <= last_d;

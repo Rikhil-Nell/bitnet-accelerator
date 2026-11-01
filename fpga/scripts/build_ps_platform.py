@@ -111,7 +111,7 @@ def main() -> int:
     # Release build: the forward pass runs on the A9, so optimisation matters.
     comp.set_app_config(key="USER_COMPILE_OPTIMIZATION_LEVEL", values="-O3")
     comp.set_app_config(key="USER_COMPILE_OPTIMIZATION_OTHER_FLAGS",
-                        values="-mfpu=neon -ffast-math -funroll-loops")
+                        values="-mfpu=neon-fp16 -mfp16-format=ieee -ffast-math -funroll-loops")
     comp.set_app_config(key="USER_COMPILE_DEBUG_LEVEL", values="-g1")
     comp.set_app_config(key="USER_LINK_LIBRARIES", values="m")
 

@@ -57,6 +57,9 @@ typedef struct {
     uint32_t version, header_bytes, n_layer, n_embd, n_ff, n_head, n_head_kv, vocab;
     float    rope_theta, rms_eps;
     uint32_t total_bytes, checksum, head_off, head_scale_off, output_norm_off, layer_table_off;
+    /* v2: each matrix is 4 unit slices at off + u * ustride (DDR bank skew) */
+    uint32_t ustride_qkv, ustride_o, ustride_gate_up, ustride_down;
+    uint32_t coarse_off, coarse_scale_off, ustride_coarse, k_pad_ff;
 } __attribute__((packed)) bn_header_t;
 
 typedef struct {
@@ -70,10 +73,14 @@ static const bn_layer_t  *LT;
 #define IMG(off) ((const void *)(uintptr_t)(IMG_ADDR + (off)))
 
 /* ---------------- buffers ---------------- */
-static int8_t  *const xq    = (int8_t *)(WORK_ADDR);                 /* <= 6912 B */
+#define XQ_ADDR     0x01F00000u   /* engine x: own section, normal non-cacheable */
+static int8_t  *const xq    = (int8_t *)(XQ_ADDR);                   /* <= 6912 B, engine reads it */
 static int32_t *const ybuf  = (int32_t *)(WORK_ADDR + 0x4000);       /* <= 128256 x 4 B */
-static float   *const kv_k  = (float *)(KV_ADDR);
-static float   *const kv_v  = (float *)(KV_ADDR + N_LAYER_MAX * MAX_CTX * KV_DIM * 4);
+/* KV cache in fp16 (as bitnet.cpp / llama.cpp), [layer][kv_head][pos][128] */
+static __fp16  *const kv_k  = (__fp16 *)(KV_ADDR);
+static __fp16  *const kv_v  = (__fp16 *)(KV_ADDR + N_LAYER_MAX * MAX_CTX * KV_DIM * 2);
+#define KVI(l, g, t) ((((size_t)(l) * N_KV_HEAD + (g)) * MAX_CTX + (t)) * HEAD_DIM)
+#define KV_BYTES (2u * N_LAYER_MAX * MAX_CTX * KV_DIM * 2u)
 
 #define A16 __attribute__((aligned(16)))
 static float xres[N_EMBD] A16;      /* residual stream */
@@ -81,8 +88,18 @@ static float hbuf[N_FF] A16;        /* normed input / FFN activations */
 static float gbuf[N_FF] A16;
 static float qbuf[N_EMBD] A16;
 static float obuf[N_EMBD] A16;
+static float kbuf[KV_DIM] A16, vbuf[KV_DIM] A16;
 static float rope_cos[HEAD_DIM / 2] A16, rope_sin[HEAD_DIM / 2] A16;
 static double inv_freq[HEAD_DIM / 2];
+static int8_t xq_c[N_FF + 40] A16;  /* cached engine input; tail stays 0 (T5 K padding) */
+
+/* Publish the quantized input to the engine: copy into the uncached section (writes
+   stream through the write buffer, no line fills, no cache maintenance), then a
+   barrier so the data is in DDR before the engine is started. */
+static inline void put_x(int k) {
+    memcpy(xq, xq_c, (size_t)k);
+    __asm__ volatile("dsb" ::: "memory");
+}
 
 static int n_past = 0;
 static int verbose = 0;
@@ -133,12 +150,12 @@ static inline float dq(float w_scale, float s) { return s > 0.0f ? w_scale / s :
 
 /* Quantize v to int8, run W (ternary, n x k) on the engine. The int32 result is in
    ybuf; returns the activation scale s (real value = y * w_scale / s). */
-static float engine_ternary(const void *w, const float *v, int n, int k) {
-    float s = k_quantize(xq, v, k);
+static float engine_ternary(const void *w, uint32_t ustride, const float *v, int n, int k) {
+    float s = k_quantize(xq_c, v, k);
     PT(P_QUANT);
-    l1_clean(xq, (uint32_t)k);
+    put_x(t5_k(k));
     PT(P_FLUSH);
-    gemv_start(GEMV_TERNARY, w, xq, ybuf, n, k);
+    gemv_start(GEMV_T5, w, ustride, xq, ybuf, n, k);
     uint32_t cyc = gemv_wait();
     PT(P_PL);
     l1_invalidate(ybuf, (uint32_t)n * 4u);
@@ -150,91 +167,59 @@ static float engine_ternary(const void *w, const float *v, int n, int k) {
 
 /* GQA attention for one layer: 4 query heads share each KV head, so each K/V row
    is loaded once per group. */
+static int attn_v3 = 1;
+
 static void attention(int l, int pos) {
-    static float sc[4][MAX_CTX];
+    if (attn_v3) {   /* 4 heads per NEON vector through scores, softmax and PV */
+        static float32x4_t sc4[MAX_CTX + 1];
+        for (int g = 0; g < N_KV_HEAD; g++)
+            attn_group(obuf + g * 4 * HEAD_DIM, qbuf + g * 4 * HEAD_DIM, kv_k + KVI(l, g, 0),
+                       kv_v + KVI(l, g, 0), pos + 1, sc4);
+        return;
+    }
+    static float sc[4][MAX_CTX + 4] A16;
     const float inv_sqrt = 1.0f / sqrtf((float)HEAD_DIM);
-    const int G = N_HEAD / N_KV_HEAD;
+    const int G = N_HEAD / N_KV_HEAD, T = pos + 1;
     for (int g = 0; g < N_KV_HEAD; g++) {
-        const float *kb = kv_k + (size_t)l * MAX_CTX * KV_DIM + g * HEAD_DIM;
-        const float *vb = kv_v + (size_t)l * MAX_CTX * KV_DIM + g * HEAD_DIM;
+        const __fp16 *kb = kv_k + KVI(l, g, 0);
+        const __fp16 *vb = kv_v + KVI(l, g, 0);
         const float *q = qbuf + g * G * HEAD_DIM;
-        float mx[4] = {-INFINITY, -INFINITY, -INFINITY, -INFINITY};
-        for (int t = 0; t <= pos; t++) {
-            const float *kt = kb + (size_t)t * KV_DIM;
-            for (int o = 0; o < HEAD_DIM; o += 8) PF(kt + KV_DIM + o);
-            for (int j = 0; j < G; j++) {
-                float d = dot128(q + j * HEAD_DIM, kt) * inv_sqrt;
-                sc[j][t] = d;
-                if (d > mx[j]) mx[j] = d;
-            }
+        for (int t = 0; t < T; t++) {
+            const __fp16 *kt = kb + (size_t)t * HEAD_DIM;
+            PF(kt + 512); PF(kt + 528); PF(kt + 544); PF(kt + 560);
+            PF(kt + 576); PF(kt + 592); PF(kt + 608); PF(kt + 624);
+            float d[4];
+            qk4_f16(q, kt, d);
+            sc[0][t] = d[0] * inv_sqrt; sc[1][t] = d[1] * inv_sqrt;
+            sc[2][t] = d[2] * inv_sqrt; sc[3][t] = d[3] * inv_sqrt;
         }
         for (int j = 0; j < G; j++) {
-            float sum = 0.0f;
-            for (int t = 0; t <= pos; t++) { float e = expf(sc[j][t] - mx[j]); sc[j][t] = e; sum += e; }
-            float inv = 1.0f / sum;
-            for (int t = 0; t <= pos; t++) sc[j][t] *= inv;
+            float *s = sc[j];
+            float mx = -INFINITY;
+            for (int t = 0; t < T; t++) if (s[t] > mx) mx = s[t];
+            for (int t = T; t < ((T + 3) & ~3); t++) s[t] = -INFINITY;
+            float32x4_t sum4 = vdupq_n_f32(0);
+            for (int t = 0; t < T; t += 4) {
+                float32x4_t e = exp_q(vsubq_f32(vld1q_f32(s + t), vdupq_n_f32(mx)));
+                vst1q_f32(s + t, e);
+                sum4 = vaddq_f32(sum4, e);
+            }
+            float inv = 1.0f / hsum4(sum4);
+            for (int t = 0; t < T; t += 4) vst1q_f32(s + t, vmulq_n_f32(vld1q_f32(s + t), inv));
         }
         float *o = obuf + g * G * HEAD_DIM;
-        memset(o, 0, sizeof(float) * G * HEAD_DIM);
-        for (int t = 0; t <= pos; t++) {
-            const float *vt = vb + (size_t)t * KV_DIM;
-            for (int o = 0; o < HEAD_DIM; o += 8) PF(vt + KV_DIM + o);
-            for (int j = 0; j < G; j++) axpy128(o + j * HEAD_DIM, sc[j][t], vt);
-        }
+        pv2_f16(o, o + HEAD_DIM, sc[0], sc[1], vb, HEAD_DIM, T);
+        pv2_f16(o + 2 * HEAD_DIM, o + 3 * HEAD_DIM, sc[2], sc[3], vb, HEAD_DIM, T);
     }
 }
 
 /* ---------------- coarse LM head ----------------
- * The int8 head is 328 MB per token. A ternary copy (82 MB, absmean threshold,
- * least-squares row scale) ranks all 128K rows on the engine; the top CH_TOPK are
- * then rescored exactly with the int8 rows. The exact winner was always within the
- * coarse top 16 over 250 decode steps (tools/bitnet/eval_coarse_head.py), so 64 is
- * a wide margin. Built at boot from the int8 head; lives after the image. */
+ * The int8 head is 328 MB per token. A ternary copy (66 MB in T5, absmean threshold,
+ * least-squares row scale; built by pack_board.py) ranks all 128K rows on the engine;
+ * the top CH_TOPK are then rescored exactly with the int8 rows. The exact winner was
+ * always within the coarse top 16 over 250 decode steps
+ * (tools/bitnet/eval_coarse_head.py), so 64 is a wide margin. */
 #define CH_TOPK 64
-static uint64_t *ch_w;      /* vocab x (E/32) words, engine ternary format */
-static float    *ch_scale;  /* coarse row scale x int8 row scale */
-
-static int build_coarse_head(void) {
-    const int E = N_EMBD, V = (int)H->vocab, W = E / 32;
-    const int8_t *head = (const int8_t *)IMG(H->head_off);
-    const float *head_scale = (const float *)IMG(H->head_scale_off);
-    uintptr_t a = (IMG_ADDR + H->total_bytes + 0xFFFFFu) & ~(uintptr_t)0xFFFFFu;
-    ch_w = (uint64_t *)a;
-    ch_scale = (float *)((a + (uintptr_t)V * W * 8u + 0xFFFu) & ~(uintptr_t)0xFFFu);
-    uintptr_t end = (uintptr_t)(ch_scale + V);
-    if (end > 0x40000000u) { xil_printf("# ERROR: coarse head does not fit (%08x)\r\n", (uint32_t)end); return -1; }
-    uint64_t t0 = now();
-    for (int r = 0; r < V; r++) {
-        const int8_t *w = head + (size_t)r * E;
-        int32x4_t acc = vdupq_n_s32(0);
-        for (int i = 0; i < E; i += 16) {
-            int8x16_t v = vabsq_s8(vld1q_s8(w + i));   /* |-128| does not occur: rows are in [-127, 127] */
-            acc = vpadalq_s16(acc, vpaddlq_s8(v));
-        }
-        int32_t sa = vgetq_lane_s32(acc, 0) + vgetq_lane_s32(acc, 1) + vgetq_lane_s32(acc, 2) + vgetq_lane_s32(acc, 3);
-        /* keep |w| > 0.5 * mean|w|  <=>  2*E*|w| > sa */
-        int32_t num = 0, den = 0;
-        uint64_t *out = ch_w + (size_t)r * W;
-        for (int g = 0; g < W; g++) {
-            uint64_t word = 0;
-            for (int i = 0; i < 32; i++) {
-                int32_t x = w[g * 32 + i];
-                int32_t ax = x < 0 ? -x : x;
-                if (2 * E * ax > sa) {
-                    word |= (uint64_t)(x > 0 ? 1u : 3u) << (2 * i);
-                    num += ax;
-                    den++;
-                }
-            }
-            out[g] = word;
-        }
-        ch_scale[r] = (den ? (float)num / (float)den : 0.0f) * head_scale[r];
-    }
-    Xil_DCacheFlush();   /* the engine reads ch_w from DDR */
-    xil_printf("# coarse head: %u MB at %08x, built in %u ms\r\n",
-               (uint32_t)(((uintptr_t)V * W * 8u) >> 20), (uint32_t)a, ms_since(t0));
-    return 0;
-}
 
 /* exact int8 dot of one head row with xq */
 static int32_t dot_i8(const int8_t *w, const int8_t *x, int n) {
@@ -288,21 +273,21 @@ static int head_coarse(void) {
     const int E = N_EMBD, V = (int)H->vocab;
     const int8_t *head = (const int8_t *)IMG(H->head_off);
     const float *head_scale = (const float *)IMG(H->head_scale_off);
-    l1_clean(xq, (uint32_t)E);
+    put_x(t5_k(E));
     PT(P_FLUSH);
-    gemv_start(GEMV_TERNARY, ch_w, xq, ybuf, V, E);
+    gemv_start(GEMV_T5, IMG(H->coarse_off), H->ustride_coarse, xq, ybuf, V, E);
     uint32_t cyc = gemv_wait();
     PT(P_PL);
     l1_invalidate(ybuf, (uint32_t)V * 4u);
     PT(P_INVAL);
     if (!cyc) xil_printf("# ERROR engine (coarse head)\r\n");
     pl_cycles += cyc;
-    int k = top_k(ybuf, ch_scale, V, cand, cval);
+    int k = top_k(ybuf, (const float *)IMG(H->coarse_scale_off), V, cand, cval);
     int best = -1;
     float bv = -INFINITY;
     for (int j = 0; j < k; j++) {
         int r = cand[j];
-        float v = (float)dot_i8(head + (size_t)r * E, xq, E) * head_scale[r];
+        float v = (float)dot_i8(head + (size_t)r * E, xq_c, E) * head_scale[r];
         if (v > bv || (v == bv && r < best)) { bv = v; best = r; }
     }
     PT(P_HEAD);
@@ -310,6 +295,41 @@ static int head_coarse(void) {
 }
 
 static int use_coarse_head = 1;
+
+/* Cache policy experiments: bit0 = KV cache L1-only, bit1 = image + coarse head L1-only.
+   L1-only regions stream from DDR without evicting the hot working buffers from L2. */
+static int mem_mode = 0;
+static void set_region(uintptr_t base, uintptr_t bytes, int l1_only) {
+    for (uintptr_t a = base & ~(uintptr_t)0xFFFFF; a < base + bytes; a += 0x100000u)
+        Xil_SetTlbAttributes(a, l1_only ? WORK_SECTION_ATTR : NORM_WB_CACHE);
+}
+static void set_mem_mode(int m) {
+    set_region(KV_ADDR, KV_BYTES, m & 1);
+    set_region(IMG_ADDR, 0x40000000u - IMG_ADDR, (m >> 1) & 1);
+    Xil_DCacheFlush();
+    mem_mode = m;
+}
+
+/* Kernel micro-benchmark on hot (cached) data: ps per element. */
+volatile float bench_sink;
+static void bench_kernels(void) {
+    const int n = N_EMBD, R = 200;
+    const float *w = (const float *)IMG(LT[0].attn_norm_off);
+    for (int i = 0; i < n; i++) gbuf[i] = (float)((i * 37) % 101 - 50) * 0.01f;
+    uint64_t t0;
+#define BENCH(name, stmt) do { stmt; t0 = now(); for (int r_ = 0; r_ < R; r_++) { stmt; } \
+        xil_printf("# bench %s: %u ps/elem\r\n", name, (uint32_t)((now() - t0) * 1000000000000ull / GT_HZ / ((uint64_t)R * n))); } while (0)
+    BENCH("sum_sq", bench_sink += sum_sq(gbuf, n));
+    BENCH("rms_norm", k_rms_norm(hbuf, gbuf, w, n, 1e-5f));
+    BENCH("abs_max", bench_sink += abs_max(gbuf, n));
+    BENCH("quantize", bench_sink += k_quantize(xq_c, gbuf, n));
+    BENCH("put_x", put_x(n));
+    BENCH("dequant", k_dequant(hbuf, ybuf, n, 0.5f));
+    BENCH("dequant_add", k_dequant_add(xres, ybuf, n, 0.5f));
+    BENCH("relu2_gate", k_relu2_gate(hbuf, ybuf, ybuf + n, n, 0.5f, 0.25f));
+    BENCH("l1_inval(y)", l1_invalidate(ybuf, (uint32_t)n * 4u));
+#undef BENCH
+}
 
 /* ---------------- forward pass for one token ---------------- */
 static int forward(int token, int want_logits) {
@@ -330,38 +350,41 @@ static int forward(int token, int want_logits) {
 
     for (uint32_t l = 0; l < H->n_layer; l++) {
         const bn_layer_t *L = &LT[l];
-        float *kc = kv_k + ((size_t)l * MAX_CTX + pos) * KV_DIM;
-        float *vc = kv_v + ((size_t)l * MAX_CTX + pos) * KV_DIM;
+        /* new K/V rows go to [layer][kv head][pos] */
         float s;
 
         /* attention */
         rms_norm(hbuf, xres, (const float *)IMG(L->attn_norm_off), E);
         PT(P_NORM);
-        s = engine_ternary(IMG(L->qkv_off), hbuf, QKV_N, E);
+        s = engine_ternary(IMG(L->qkv_off), H->ustride_qkv, hbuf, QKV_N, E);
         k_dequant(qbuf, ybuf, E, dq(L->s_q, s));
-        k_dequant(kc, ybuf + E, KV_DIM, dq(L->s_k, s));
-        k_dequant(vc, ybuf + E + KV_DIM, KV_DIM, dq(L->s_v, s));
+        k_dequant(kbuf, ybuf + E, KV_DIM, dq(L->s_k, s));
+        k_dequant(vbuf, ybuf + E + KV_DIM, KV_DIM, dq(L->s_v, s));
         PT(P_DEQ);
         k_rope(qbuf, N_HEAD, rope_cos, rope_sin);
-        k_rope(kc, N_KV_HEAD, rope_cos, rope_sin);
+        k_rope(kbuf, N_KV_HEAD, rope_cos, rope_sin);
+        for (int g = 0; g < N_KV_HEAD; g++) {
+            k_to_f16(kv_k + KVI(l, g, pos), kbuf + g * HEAD_DIM, HEAD_DIM);
+            k_to_f16(kv_v + KVI(l, g, pos), vbuf + g * HEAD_DIM, HEAD_DIM);
+        }
         PT(P_ROPE);
         attention((int)l, pos);
         PT(P_ATTN);
         rms_norm(hbuf, obuf, (const float *)IMG(L->attn_sub_norm_off), E);
         PT(P_NORM);
-        s = engine_ternary(IMG(L->o_off), hbuf, E, E);
+        s = engine_ternary(IMG(L->o_off), H->ustride_o, hbuf, E, E);
         k_dequant_add(xres, ybuf, E, dq(L->s_o, s));
         PT(P_DEQ);
 
         /* feed-forward: relu(gate)^2 * up */
         rms_norm(hbuf, xres, (const float *)IMG(L->ffn_norm_off), E);
         PT(P_NORM);
-        s = engine_ternary(IMG(L->gate_up_off), hbuf, 2 * F, E);
+        s = engine_ternary(IMG(L->gate_up_off), H->ustride_gate_up, hbuf, 2 * F, E);
         k_relu2_gate(gbuf, ybuf, ybuf + F, F, dq(L->s_gate, s), dq(L->s_up, s));
         PT(P_ELEM);
         rms_norm(hbuf, gbuf, (const float *)IMG(L->ffn_sub_norm_off), F);
         PT(P_NORM);
-        s = engine_ternary(IMG(L->down_off), hbuf, E, F);
+        s = engine_ternary(IMG(L->down_off), H->ustride_down, hbuf, E, F);
         k_dequant_add(xres, ybuf, E, dq(L->s_down, s));
         PT(P_DEQ);
 
@@ -383,18 +406,19 @@ static int forward(int token, int want_logits) {
     PT_MARK();
     rms_norm(hbuf, xres, (const float *)IMG(H->output_norm_off), E);
     PT(P_NORM);
-    k_quantize(xq, hbuf, E);
+    k_quantize(xq_c, hbuf, E);
     PT(P_QUANT);
-    if (use_coarse_head && ch_w) return head_coarse();
+    if (use_coarse_head) return head_coarse();
     /* Split the vocab so the four unit slices start 8 KB apart (mod 32 KB): if they
        start a multiple of 32 KB apart they hit the same DDR bank and bandwidth halves
        (measured 2.25 vs 4.05 GB/s). 4 x 32016 rows, then the remaining rows. */
     const int n1 = 4 * 32016;
-    l1_clean(xq, (uint32_t)E);
+    put_x(E);
     PT(P_FLUSH);
-    gemv_start(GEMV_INT8, head, xq, ybuf, n1, E);
+    gemv_start(GEMV_INT8, head, (uint32_t)(n1 / 4) * E, xq, ybuf, n1, E);
     uint32_t cyc = gemv_wait();
-    gemv_start(GEMV_INT8, head + (uint32_t)n1 * E, xq, ybuf + n1, (int)H->vocab - n1, E);
+    gemv_start(GEMV_INT8, head + (uint32_t)n1 * E, (uint32_t)(((int)H->vocab - n1) / 4) * E, xq,
+               ybuf + n1, (int)H->vocab - n1, E);
     uint32_t cyc2 = gemv_wait();
     PT(P_PL);
     l1_invalidate(ybuf, H->vocab * 4u);
@@ -406,13 +430,250 @@ static int forward(int token, int want_logits) {
     return best;
 }
 
+/* ---------------- streamed forward pass (engine v2 progress counters) ----------------
+ * The engine reports, per unit, how many output rows are already in DDR. While it
+ * streams the rest of the weights, the A9 runs the epilogue on the finished rows:
+ * dequantize, residual add, ReLU^2 gate, and the statistics of the next RMSNorm
+ * (sum of squares, and absmax of x * norm_weight). When the engine finishes, only one
+ * quantize pass is left before the next matrix can start. */
+#define OV_CHUNK 64          /* rows: run an epilogue once this many new rows are ready */
+
+static uint64_t ov_epi;      /* A9 time spent in epilogues during the current stream */
+
+/* charge a finished stream: wall time minus epilogue -> PL wait, epilogue -> P_DEQ */
+static void ov_account(void) {
+    uint64_t t = now();
+    uint32_t st = gemv_r(0x04);
+    if (st & 4u) xil_printf("# ERROR engine (status %08x)\r\n", st);
+    pl_cycles += gemv_r(0x18);
+    prof[P_PL] += (t - pt_mark) - ov_epi;
+    prof[P_DEQ] += ov_epi;
+    pt_mark = t;
+    ov_epi = 0;
+}
+
+typedef void (*rows_fn)(int r0, int r1);   /* global output rows [r0, r1), in L1-coherent ybuf */
+
+/* Stream an n-row engine command already started; fn gets rows as they land. */
+static void stream_rows(int n, rows_fn fn) {
+    const int rpu = n / GEMV_NU;
+    int done[GEMV_NU] = {0, 0, 0, 0};
+    for (;;) {
+        int fin = gemv_done(), left = 0;
+        for (int u = 0; u < GEMV_NU; u++) {
+            int r = fin ? rpu : (int)gemv_rows_done(u, (uint32_t)rpu);
+            if (r > done[u] && (fin || r - done[u] >= OV_CHUNK)) {
+                int g0 = u * rpu + done[u], g1 = u * rpu + r;
+                uint64_t t = now();
+                l1_invalidate(ybuf + g0, (uint32_t)(g1 - g0) * 4u);
+                fn(g0, g1);
+                ov_epi += now() - t;
+                done[u] = r;
+            }
+            left |= done[u] < rpu;
+        }
+        if (!left) break;
+    }
+    (void)gemv_wait();   /* the unit may still be closing its last burst */
+    ov_account();
+}
+
+/* ---- per-op epilogue context ---- */
+static struct {
+    float fq, fk, fv, f;          /* dequant factors */
+    float fg, fu;
+    const float *w;               /* norm weight applied in the epilogue */
+    stats_t st;                   /* statistics for the next quantization */
+} ov;
+
+static void epi_qkv(int r0, int r1) {
+    const int E = N_EMBD;
+    int a = r0 < E ? r0 : E, b = r1 < E ? r1 : E;
+    if (b > a) k_dequant(qbuf + a, ybuf + a, b - a, ov.fq);
+    a = r0 > E ? r0 : E; b = r1 < E + KV_DIM ? r1 : E + KV_DIM;
+    if (b > a) k_dequant(kbuf + (a - E), ybuf + a, b - a, ov.fk);
+    a = r0 > E + KV_DIM ? r0 : E + KV_DIM; b = r1;
+    if (b > a) k_dequant(vbuf + (a - E - KV_DIM), ybuf + a, b - a, ov.fv);
+}
+
+/* o / down: residual add, then the next norm's stats (u = x * w into hbuf) */
+static void epi_resid(int r0, int r1) {
+    k_resid_norm(xres + r0, hbuf + r0, ybuf + r0, ov.w + r0, r1 - r0, ov.f, &ov.st);
+}
+
+/* gate_up: gate rows [0, F) live in units 0-1, up rows [F, 2F) in units 2-3, so unit u
+   and unit u+2 produce matching gate/up rows at the same pace. */
+static void stream_gate_up(void) {
+    const int F = N_FF, rpu = 2 * F / GEMV_NU;   /* 3456 */
+    int done[2] = {0, 0};
+    for (;;) {
+        int fin = gemv_done(), left = 0;
+        for (int p = 0; p < 2; p++) {
+            int r = rpu;
+            if (!fin) {
+                int ra = (int)gemv_rows_done(p, (uint32_t)rpu), rb = (int)gemv_rows_done(p + 2, (uint32_t)rpu);
+                r = ra < rb ? ra : rb;
+            }
+            if (r > done[p] && (fin || r - done[p] >= OV_CHUNK)) {
+                int i0 = p * rpu + done[p], i1 = p * rpu + r;
+                uint64_t t = now();
+                l1_invalidate(ybuf + i0, (uint32_t)(i1 - i0) * 4u);
+                l1_invalidate(ybuf + F + i0, (uint32_t)(i1 - i0) * 4u);
+                k_gate_norm(gbuf + i0, ybuf + i0, ybuf + F + i0, ov.w + i0, i1 - i0, ov.fg, ov.fu, &ov.st);
+                ov_epi += now() - t;
+                done[p] = r;
+            }
+            left |= done[p] < rpu;
+        }
+        if (!left) break;
+    }
+    (void)gemv_wait();
+    ov_account();
+}
+
+/* Quantize u (= x * w, whose x has sum of squares ss over n) for the engine and start
+   it. Returns the true activation scale s (real value of the input = q / s). */
+static float ov_launch(const void *w, uint32_t ustride, const float *u, const stats_t *st, int n_rows,
+                       int k, int n_norm) {
+    float ss = stats_ss(st), amax = stats_amax(st);
+    float r = 1.0f / sqrtf(ss / (float)n_norm + H->rms_eps);   /* rms_norm factor */
+    float qs = amax > 0.0f ? 127.0f / amax : 0.0f;
+    k_quantize_s(xq_c, u, k, qs);
+    PT(P_QUANT);
+    put_x(t5_k(k));
+    PT(P_FLUSH);
+    gemv_start(GEMV_T5, w, ustride, xq, ybuf, n_rows, k);
+    return qs / r;   /* s of quantize(rms_norm(x) * w) */
+}
+
+/* ---- incremental top-K over coarse scores ---- */
+static struct { int k, mi; float thr; int idx[CH_TOPK]; float val[CH_TOPK]; } tk;
+
+static void topk_reset(void) { tk.k = 0; tk.mi = 0; tk.thr = -INFINITY; }
+
+static void topk_add(int r0, int r1) {
+    const int32_t *y = ybuf;
+    const float *cs = (const float *)IMG(H->coarse_scale_off);
+    for (int i = r0; i < r1; i += 4) {
+        PF(cs + i + 64);
+        float32x4_t v = vmulq_f32(vcvtq_f32_s32(vld1q_s32(y + i)), vld1q_f32(cs + i));
+        uint32x4_t gt = vcgtq_f32(v, vdupq_n_f32(tk.thr));
+        uint32x2_t m2 = vorr_u32(vget_low_u32(gt), vget_high_u32(gt));
+        if (!(vget_lane_u32(m2, 0) | vget_lane_u32(m2, 1))) continue;
+        float lv[4];
+        vst1q_f32(lv, v);
+        for (int j = 0; j < 4; j++) {
+            if (!(lv[j] > tk.thr)) continue;
+            int slot = tk.k < CH_TOPK ? tk.k++ : tk.mi;
+            tk.idx[slot] = i + j;
+            tk.val[slot] = lv[j];
+            if (tk.k == CH_TOPK) {
+                tk.mi = 0;
+                for (int t = 1; t < tk.k; t++) if (tk.val[t] < tk.val[tk.mi]) tk.mi = t;
+                tk.thr = tk.val[tk.mi];
+            }
+        }
+    }
+}
+
+static int forward_ov(int token, int want_logits) {
+    const int E = N_EMBD, F = N_FF, pos = n_past;
+    const int8_t *head = (const int8_t *)IMG(H->head_off);
+    const float *head_scale = (const float *)IMG(H->head_scale_off);
+
+    PT_MARK();
+    for (int i = 0; i < E; i++) xres[i] = (float)head[(uint32_t)token * E + i] * head_scale[token];
+    for (int i = 0; i < HEAD_DIM / 2; i++) {
+        double a = (double)pos * inv_freq[i];
+        rope_cos[i] = (float)cos(a);
+        rope_sin[i] = (float)sin(a);
+    }
+    stats_init(&ov.st);
+    k_norm_stats(hbuf, xres, (const float *)IMG(LT[0].attn_norm_off), E, &ov.st);
+    PT(P_EMB);
+
+    for (uint32_t l = 0; l < H->n_layer; l++) {
+        const bn_layer_t *L = &LT[l];
+        stats_t st_in = ov.st;
+        float s;
+
+        /* qkv: input hbuf = x * attn_norm, stats from the previous epilogue */
+        s = ov_launch(IMG(L->qkv_off), H->ustride_qkv, hbuf, &st_in, QKV_N, E, E);
+        ov.fq = dq(L->s_q, s); ov.fk = dq(L->s_k, s); ov.fv = dq(L->s_v, s);
+        stream_rows(QKV_N, epi_qkv);
+        k_rope(qbuf, N_HEAD, rope_cos, rope_sin);
+        k_rope(kbuf, N_KV_HEAD, rope_cos, rope_sin);
+        for (int g = 0; g < N_KV_HEAD; g++) {
+            k_to_f16(kv_k + KVI(l, g, pos), kbuf + g * HEAD_DIM, HEAD_DIM);
+            k_to_f16(kv_v + KVI(l, g, pos), vbuf + g * HEAD_DIM, HEAD_DIM);
+        }
+        PT(P_ROPE);
+        attention((int)l, pos);
+        PT(P_ATTN);
+
+        /* o: input = attention output * attn_sub_norm; epilogue = residual + ffn_norm stats */
+        stats_init(&ov.st);
+        k_norm_stats(hbuf, obuf, (const float *)IMG(L->attn_sub_norm_off), E, &ov.st);
+        PT(P_NORM);
+        st_in = ov.st;
+        s = ov_launch(IMG(L->o_off), H->ustride_o, hbuf, &st_in, E, E, E);
+        ov.f = dq(L->s_o, s);
+        ov.w = (const float *)IMG(L->ffn_norm_off);
+        stats_init(&ov.st);
+        stream_rows(E, epi_resid);
+
+        /* gate_up: input hbuf = x * ffn_norm; epilogue = ReLU^2 gate + ffn_sub_norm stats */
+        st_in = ov.st;
+        s = ov_launch(IMG(L->gate_up_off), H->ustride_gate_up, hbuf, &st_in, 2 * F, E, E);
+        ov.fg = dq(L->s_gate, s); ov.fu = dq(L->s_up, s);
+        ov.w = (const float *)IMG(L->ffn_sub_norm_off);
+        stats_init(&ov.st);
+        stream_gate_up();
+
+        /* down: input gbuf = a * ffn_sub_norm; epilogue = residual + next norm's stats */
+        st_in = ov.st;
+        s = ov_launch(IMG(L->down_off), H->ustride_down, gbuf, &st_in, E, F, F);
+        ov.f = dq(L->s_down, s);
+        ov.w = (const float *)IMG(l + 1 < H->n_layer ? LT[l + 1].attn_norm_off : H->output_norm_off);
+        stats_init(&ov.st);
+        stream_rows(E, epi_resid);
+    }
+    n_past++;
+    if (!want_logits) return -1;
+
+    /* LM head: hbuf = x * output_norm. Coarse T5 ranking streamed into a top-K,
+       then exact int8 rescoring of the candidates. */
+    {
+        float amax = stats_amax(&ov.st);
+        k_quantize_s(xq_c, hbuf, E, amax > 0.0f ? 127.0f / amax : 0.0f);
+        PT(P_QUANT);
+        put_x(t5_k(E));
+        PT(P_FLUSH);
+        gemv_start(GEMV_T5, IMG(H->coarse_off), H->ustride_coarse, xq, ybuf, (int)H->vocab, E);
+        topk_reset();
+        stream_rows((int)H->vocab, topk_add);
+    }
+    int best = -1;
+    float bv = -INFINITY;
+    for (int j = 0; j < tk.k; j++) {
+        int r = tk.idx[j];
+        float v = (float)dot_i8(head + (size_t)r * E, xq_c, E) * head_scale[r];
+        if (v > bv || (v == bv && r < best)) { bv = v; best = r; }
+    }
+    PT(P_HEAD);
+    return best;
+}
+
+static int use_overlap = 1;
+
+
 /* ---------------- SD card load ---------------- */
 static FATFS fatfs;
 
 /* Sum of the image after the header; 0xFFFFFFFF if the header is not plausible. */
 static int image_ok(uint32_t size_expect) {
     H = (const bn_header_t *)IMG(0);
-    if (memcmp(H->magic, "BNZ1", 4) || H->version != 1 || (size_expect && H->total_bytes != size_expect) ||
+    if (memcmp(H->magic, "BNZ2", 4) || H->version != 2 || H->k_pad_ff != (uint32_t)t5_k(N_FF) || (size_expect && H->total_bytes != size_expect) ||
         H->total_bytes > IMG_MAX || H->total_bytes < H->header_bytes ||
         H->n_embd != N_EMBD || H->n_ff != N_FF || H->n_head != N_HEAD || H->n_head_kv != N_KV_HEAD ||
         H->n_layer > N_LAYER_MAX)
@@ -513,7 +774,7 @@ static void cmd_generate(const char *s) {
     prof_reset();
     uint64_t t0 = now();
     int next = -1;
-    for (int i = 0; i < n; i++) next = forward(ids[i], i == n - 1);
+    for (int i = 0; i < n; i++) next = (use_overlap ? forward_ov : forward)(ids[i], i == n - 1);
     uint32_t prefill_ms = ms_since(t0), prefill_pl = pl_cycles;
     prof_print("prefill", n);
     prof_reset();
@@ -526,7 +787,7 @@ static void cmd_generate(const char *s) {
         xil_printf("T %d", next);
         gen++;
         if (next == TOK_EOT || next == TOK_EOS || gen == max_new) { xil_printf(" 0\r\n"); break; }
-        next = forward(next, 1);
+        next = (use_overlap ? forward_ov : forward)(next, 1);
         xil_printf(" %u\r\n", ms_since(ts));
     }
     uint32_t decode_ms = ms_since(t0);
@@ -544,9 +805,9 @@ int main(void) {
     }
     /* x / y buffers: L1 only (see kernels.h), then push anything stale out of L2 */
     Xil_SetTlbAttributes(WORK_ADDR, WORK_SECTION_ATTR);
+    Xil_SetTlbAttributes(XQ_ADDR, NORM_NONCACHE);
     Xil_DCacheFlush();
     if (load_image() != 0) { xil_printf("# HALT\r\n"); return 1; }
-    if (build_coarse_head() != 0) ch_w = 0;
     for (int i = 0; i < HEAD_DIM / 2; i++)
         inv_freq[i] = 1.0 / pow((double)H->rope_theta, (double)(2 * i) / HEAD_DIM);
     xil_printf("# model: %u layers, vocab %u, ctx %d\r\nREADY\r\n", H->n_layer, H->vocab, MAX_CTX);
@@ -557,8 +818,13 @@ int main(void) {
             case 'G': cmd_generate(line + 1); break;
             case 'R': n_past = 0; xil_printf("OK\r\n"); break;
             case 'V': verbose = !verbose; xil_printf("OK verbose=%d\r\n", verbose); break;
+            case 'M': { int m = 0; parse_int(line + 1, &m); set_mem_mode(m);
+                        xil_printf("OK mem_mode=%d\r\n", mem_mode); break; }
+            case 'B': bench_kernels(); xil_printf("OK\r\n"); break;
+            case 'O': use_overlap = !use_overlap; xil_printf("OK overlap=%d\r\n", use_overlap); break;
+            case 'A': attn_v3 = !attn_v3; xil_printf("OK attn_v3=%d\r\n", attn_v3); break;
             case 'H': use_coarse_head = !use_coarse_head;
-                      xil_printf("OK coarse_head=%d\r\n", use_coarse_head && ch_w != 0); break;
+                      xil_printf("OK coarse_head=%d\r\n", use_coarse_head); break;
             case 'I': xil_printf("I ctx %d/%d layers %u\r\n", n_past, MAX_CTX, H->n_layer); break;
             default:  xil_printf("X unknown command\r\n"); break;
         }

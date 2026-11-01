@@ -1,6 +1,7 @@
 # XSDB via the official xsdb.bat launcher with a minimal PATH
 # (full Vitis settings64.bat hits the Windows PATH length limit; the unwrapped
 # xsdb.exe cannot find the xsdb Tcl package).
+param([string]$Script = "fpga/scripts/run_ps_zybo.tcl")
 $ErrorActionPreference = "Stop"
 $Root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $xsdb = "D:\Xilinx\2026.1\Vitis\bin\xsdb.bat"
@@ -15,5 +16,5 @@ if ($env:BITNET_DATA_ADDR) { $extra += "set BITNET_DATA_ADDR=$($env:BITNET_DATA_
 if ($env:BITNET_JTAG_HZ) { $extra += "set BITNET_JTAG_HZ=$($env:BITNET_JTAG_HZ)" }
 $prefix = ($extra -join "&& ")
 if ($prefix) { $prefix += "&& " }
-cmd /c "${prefix}set PATH=C:\Windows\System32;C:\Windows;D:\Xilinx\2026.1\Vitis\bin&& set VITIS_EMBEDDED_INSTALL=true&& $xsdb fpga\scripts\run_ps_zybo.tcl"
+cmd /c "${prefix}set PATH=C:\Windows\System32;C:\Windows;D:\Xilinx\2026.1\Vitis\bin&& set VITIS_EMBEDDED_INSTALL=true&& $xsdb $Script"
 exit $LASTEXITCODE

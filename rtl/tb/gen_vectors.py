@@ -4,7 +4,7 @@
 Writes into the output directory:
   mem.hex    initial memory image ($readmemh, 64-bit words, @word-address lines)
   exp.hex    expected memory image for the y regions
-  cases.txt  one line per command: mode K N x_addr w0..w3 y0..y3
+  cases.txt  one line per command: mode x_beats row_beats N x_addr w0..w3 y0..y3
 """
 
 from __future__ import annotations
@@ -16,20 +16,21 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools" / "bitnet"))
-from engine_format import (NU, align, check_shape, gemv, pack_int8, pack_ternary,  # noqa: E402
-                           pack_x, unit_slices)
+from engine_format import (NU, align, gemv, pack_int8, pack_t5, t5_k,  # noqa: E402
+                           unit_slices)
 
 BASE = 0x0010_0000
 MEM_BYTES = 4 << 20   # must match MEM_WORDS in the testbench
 
-# (mode, K, N): small corner cases plus the model's real K values
+# (mode, K, N): mode 0 = T5 ternary, 1 = int8. Corner cases plus the model's real K.
 CASES = [
-    (0, 64, 8),        # smallest: 2 rows per unit, 2 beats per row
-    (0, 32, 64),       # 1 beat per row: back-to-back row completions
+    (0, 80, 8),        # 2 T5 beats per row, 2 rows per unit
+    (0, 40, 64),       # 1 beat per row: back-to-back row completions
+    (0, 64, 8),        # K not a multiple of 40: zero padding to 80
     (0, 2560, 40),     # model K (attn / gate / up)
-    (0, 6912, 16),     # model K (ffn_down), deepest activation buffer use
-    (1, 256, 24),      # int8 (LM head mode)
-    (1, 2560, 8),      # int8 at model K
+    (0, 6912, 16),     # model K (ffn_down): padded to 6920, deepest activation use
+    (1, 256, 24),      # int8
+    (1, 2560, 8),      # int8 at model K (exact-head mode)
     (0, 2560, 8),      # back-to-back command reusing the engine
 ]
 
@@ -52,7 +53,7 @@ def main() -> int:
             into[(addr >> 3) + i] = int(w)
 
     for mode, k, n in CASES:
-        check_shape(n, k)
+        assert n % (2 * NU) == 0
         x = rng.integers(-128, 128, size=k, dtype=np.int64).astype(np.int8)
         x[0], x[-1] = -128, 127   # extremes
         if mode == 0:
@@ -62,14 +63,20 @@ def main() -> int:
             w[0, :] = -128        # worst-case magnitude row
         y = gemv(w, x)
 
+        kp = t5_k(k) if mode == 0 else k
+        xb = kp // 8
+        rb = kp // 40 if mode == 0 else k // 8
+        xpad = np.zeros(kp, dtype=np.int8)
+        xpad[:k] = x
         x_addr = ptr = align(ptr, 128)
-        put(pack_x(x), x_addr, mem)
-        ptr += k
+        put(np.frombuffer(xpad.tobytes(), dtype="<u8"), x_addr, mem)
+        ptr += kp
         w_addrs, y_addrs = [], []
         for sl in unit_slices(n):
             ptr = align(ptr)
             w_addrs.append(ptr)
-            words = pack_ternary(w[sl]) if mode == 0 else pack_int8(w[sl])
+            words = (np.frombuffer(pack_t5(w[sl]).tobytes(), dtype="<u8") if mode == 0
+                     else pack_int8(w[sl]))
             put(words, ptr, mem)
             ptr += words.size * 8
         for sl in unit_slices(n):
@@ -80,7 +87,7 @@ def main() -> int:
             # poison the output area so stale data can't pass
             put(np.full(yw.size, 0xDEADBEEFDEADBEEF, dtype=np.uint64), ptr, mem)
             ptr += yw.size * 8
-        lines.append(" ".join(str(v) for v in (mode, k, n, x_addr, *w_addrs, *y_addrs)))
+        lines.append(" ".join(str(v) for v in (mode, xb, rb, n, x_addr, *w_addrs, *y_addrs)))
         assert len(w_addrs) == NU
 
     if ptr > MEM_BYTES:

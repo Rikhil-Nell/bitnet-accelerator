@@ -149,9 +149,9 @@ module tb_gemv_top;
     endtask
 
     // ---------------- test sequence ----------------
-    int fd, mode, k, n, ncase = 0, errors = 0;
+    int fd, mode, xb, rb, n, ncase = 0, errors = 0;
     int unsigned xa, wa[NU], ya[NU];
-    reg [31:0] st, cyc, ver;
+    reg [31:0] st, cyc, ver, prog;
     string vdir;
 
     initial begin
@@ -166,13 +166,14 @@ module tb_gemv_top;
         repeat (5) @(posedge clk);
 
         csr_read(12'h1C, ver);
-        if (ver !== 32'h47454D31) begin $display("FAIL: VERSION %h", ver); $finish; end
+        if (ver !== 32'h47454D32) begin $display("FAIL: VERSION %h", ver); $finish; end
 
         fd = $fopen({vdir, "/cases.txt"}, "r");
-        while ($fscanf(fd, "%d %d %d %d %d %d %d %d %d %d %d %d\n", mode, k, n, xa,
-                       wa[0], wa[1], wa[2], wa[3], ya[0], ya[1], ya[2], ya[3]) == 12) begin
+        while ($fscanf(fd, "%d %d %d %d %d %d %d %d %d %d %d %d %d\n", mode, xb, rb, n, xa,
+                       wa[0], wa[1], wa[2], wa[3], ya[0], ya[1], ya[2], ya[3]) == 13) begin
             csr_write(12'h08, mode);
-            csr_write(12'h0C, k);
+            csr_write(12'h0C, xb);
+            csr_write(12'h50, rb);
             csr_write(12'h10, n / NU);
             csr_write(12'h14, xa);
             for (int u = 0; u < NU; u++) begin
@@ -183,6 +184,14 @@ module tb_gemv_top;
             do csr_read(12'h04, st); while (!st[0]);
             csr_read(12'h18, cyc);
             if (st[2]) begin $display("FAIL: case %0d AXI error flag, STATUS=%h", ncase, st); errors++; end
+            // progress = acknowledged write bursts (16 beats = 32 rows each, last may be short)
+            for (int u = 0; u < NU; u++) begin
+                csr_read(12'h40 + 4*u, prog);
+                if (prog != (n / NU / 2 + 15) / 16) begin
+                    $display("FAIL: case %0d unit %0d progress %0d, expected %0d", ncase, u, prog, (n / NU / 2 + 15) / 16);
+                    errors++;
+                end
+            end
             for (int u = 0; u < NU; u++)
                 for (int i = 0; i < n / NU / 2; i++) begin
                     int unsigned a = (ya[u] >> 3) + i;
@@ -193,8 +202,8 @@ module tb_gemv_top;
                         errors++;
                     end
                 end
-            $display("case %0d: mode=%0d K=%0d N=%0d cycles=%0d (%0.2f beats/cycle/unit)", ncase, mode, k, n, cyc,
-                     real'((mode ? k/8 : k/32) * (n/NU) + k/8) / cyc);
+            $display("case %0d: mode=%0d x_beats=%0d row_beats=%0d N=%0d cycles=%0d (%0.2f beats/cycle/unit)",
+                     ncase, mode, xb, rb, n, cyc, real'(rb * (n/NU) + xb) / cyc);
             ncase++;
         end
         $fclose(fd);

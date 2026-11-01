@@ -4,7 +4,8 @@
 // A command writes `cmd_beats` 64-bit words to `cmd_addr` (128-byte aligned)
 // as bursts of up to 16 beats. A burst starts only once all of its data is in
 // the FIFO, so WVALID never drops mid-burst. `idle` goes high again after the
-// last write response.
+// last write response. `bursts_done` counts write responses for the current command
+// (every burst but the last is 16 beats, so 16 * bursts_done beats are in memory).
 module axi3_wr #(
     parameter FIFO_AW = 5    // 32 x 64-bit, distributed RAM
 )(
@@ -16,6 +17,7 @@ module axi3_wr #(
     input  wire [27:0] cmd_beats,
     output wire        idle,
     output reg         err,
+    output reg  [15:0] bursts_done,
 
     input  wire        push,
     input  wire [63:0] din,
@@ -76,6 +78,7 @@ module axi3_wr #(
             err       <= 1'b0;
             blen      <= 0;
             rem_nz    <= 1'b0;
+            bursts_done <= 0;
         end else begin
             blen   <= (remaining >= 28'd16) ? 5'd16 : remaining[4:0];
             rem_nz <= (remaining != 0);
@@ -83,6 +86,7 @@ module axi3_wr #(
                 remaining <= cmd_beats;
                 next_addr <= cmd_addr;
                 err       <= 1'b0;
+                bursts_done <= 0;
             end else if (start_burst) begin
                 awvalid   <= 1'b1;
                 awaddr    <= next_addr;
@@ -104,6 +108,7 @@ module axi3_wr #(
             b_pending <= b_pending + ((start_burst && !(cmd_valid && idle)) ? 8'd1 : 8'd0)
                                    - (bvalid ? 8'd1 : 8'd0);
             if (bvalid && bresp != 2'b00) err <= 1'b1;
+            if (bvalid && !(cmd_valid && idle)) bursts_done <= bursts_done + 1'b1;
         end
     end
 endmodule

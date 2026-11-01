@@ -12,7 +12,7 @@ Set-Location $Out
 python "$Root\rtl\tb\gen_vectors.py" $Out --seed $Seed
 if ($LASTEXITCODE) { exit 1 }
 
-$rtl = @("axi3_rd.v", "axi3_wr.v", "gemv_unit.v", "gemv_top.v") | ForEach-Object { Join-Path $Root "rtl\$_" }
+$rtl = @("axi3_rd.v", "axi3_wr.v", "t5_decode.v", "gemv_unit.v", "gemv_top.v") | ForEach-Object { Join-Path $Root "rtl\$_" }
 xvlog --nolog $rtl | Out-Null
 if ($LASTEXITCODE) { xvlog $rtl; exit 1 }
 xvlog --nolog -sv (Join-Path $Root "rtl\tb\tb_gemv_top.sv") | Out-Null

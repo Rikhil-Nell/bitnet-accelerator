@@ -21,3 +21,7 @@ __pycache__/
 
 # Reference papers (kept locally, not versioned)
 *.pdf
+
+# Web UI build outputs
+web/ui/node_modules/
+web/ui/dist/

@@ -19,6 +19,7 @@ set_property board_part digilentinc.com:zybo-z7-10:part0:1.2 [current_project]
 add_files -norecurse [list \
   [file join $rtl_dir axi3_rd.v] \
   [file join $rtl_dir axi3_wr.v] \
+  [file join $rtl_dir t5_decode.v] \
   [file join $rtl_dir gemv_unit.v] \
   [file join $rtl_dir gemv_top.v]]
 update_compile_order -fileset sources_1
@@ -74,7 +75,7 @@ save_bd_design
 
 set bd_file [get_files design_1.bd]
 make_wrapper -files $bd_file -top
-add_files -norecurse [file join $proj_dir bitnet_zybo.gen sources_1 bd design_1 hdl design_1_wrapper.v]
+add_files -norecurse [list [file join $proj_dir bitnet_zybo.gen sources_1 bd design_1 hdl design_1_wrapper.v]]
 set_property top design_1_wrapper [current_fileset]
 update_compile_order -fileset sources_1
 

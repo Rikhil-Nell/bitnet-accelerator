@@ -9,7 +9,7 @@ Run: python rtl/gen_gemv_top.py
 from pathlib import Path
 
 NU = 4  # STATUS packs per-unit bits into [11:4]; change it if NU changes
-VERSION = 0x47454D31  # "GEM1"
+VERSION = 0x47454D32  # "GEM2": T5 ternary, x/row beat registers, progress counters
 
 # (name, direction from master's view, width) for an AXI3 master to a Zynq HP port
 AXI3 = [
@@ -82,7 +82,9 @@ def main() -> None:
     // ---------------- CSRs ----------------
     reg        start;
     reg        mode;
-    reg [15:0] k, rows;
+    reg [10:0] x_beats;
+    reg [12:0] row_beats;
+    reg [15:0] rows;
     reg [31:0] x_addr;
     reg [31:0] w_addr [0:NU-1];
     reg [31:0] y_addr [0:NU-1];
@@ -90,6 +92,7 @@ def main() -> None:
     reg        counting;
 
     wire [NU-1:0] u_done, u_busy, u_err;
+    wire [15:0] u_prog [0:NU-1];
     reg rst_n;
     always @(posedge aclk) rst_n <= aresetn;
     wire all_done = &u_done && !start;
@@ -113,7 +116,7 @@ def main() -> None:
         if (!rst_n) begin
             awready_r <= 1'b0; wready_r <= 1'b0; bvalid_r <= 1'b0;
             arready_r <= 1'b0; rvalid_r <= 1'b0; rdata_r  <= 32'd0;
-            start <= 1'b0; mode <= 1'b0; k <= 16'd0; rows <= 16'd0; x_addr <= 32'd0;
+            start <= 1'b0; mode <= 1'b0; x_beats <= 11'd0; row_beats <= 13'd0; rows <= 16'd0; x_addr <= 32'd0;
             cycles <= 32'd0; counting <= 1'b0;
             for (n = 0; n < NU; n = n + 1) begin
                 w_addr[n] <= 32'd0;
@@ -132,7 +135,8 @@ def main() -> None:
                 case (s_axi_awaddr[7:0])
                     8'h00: start  <= s_axi_wdata[0] && !(|u_busy);
                     8'h08: mode   <= s_axi_wdata[0];
-                    8'h0C: k      <= s_axi_wdata[15:0];
+                    8'h0C: x_beats <= s_axi_wdata[10:0];
+                    8'h50: row_beats <= s_axi_wdata[12:0];
                     8'h10: rows   <= s_axi_wdata[15:0];
                     8'h14: x_addr <= s_axi_wdata;
                     default: begin
@@ -151,7 +155,8 @@ def main() -> None:
                 case (s_axi_araddr[7:0])
                     8'h04: rdata_r <= {{20'd0, u_err, u_done, 1'b0, |u_err, |u_busy, all_done}};
                     8'h08: rdata_r <= {{31'd0, mode}};
-                    8'h0C: rdata_r <= {{16'd0, k}};
+                    8'h0C: rdata_r <= {{21'd0, x_beats}};
+                    8'h50: rdata_r <= {{19'd0, row_beats}};
                     8'h10: rdata_r <= {{16'd0, rows}};
                     8'h14: rdata_r <= x_addr;
                     8'h18: rdata_r <= cycles;
@@ -161,6 +166,7 @@ def main() -> None:
                         for (n = 0; n < NU; n = n + 1) begin
                             if (s_axi_araddr[7:0] == 8'h20 + 8*n) rdata_r <= w_addr[n];
                             if (s_axi_araddr[7:0] == 8'h24 + 8*n) rdata_r <= y_addr[n];
+                            if (s_axi_araddr[7:0] == 8'h40 + 4*n) rdata_r <= {{16'd0, u_prog[n]}};
                         end
                     end
                 endcase
@@ -201,9 +207,9 @@ def main() -> None:
 
     gemv_unit u{u} (
         .clk(aclk), .rstn(aresetn),
-        .start(start), .mode(mode), .k(k), .rows(rows),
+        .start(start), .mode(mode), .x_beats(x_beats), .row_beats(row_beats), .rows(rows),
         .x_addr(x_addr), .w_addr(w_addr[{u}]), .y_addr(y_addr[{u}]),
-        .done(u_done[{u}]), .busy(u_busy[{u}]), .err(u_err[{u}]),
+        .done(u_done[{u}]), .busy(u_busy[{u}]), .err(u_err[{u}]), .progress(u_prog[{u}]),
         .araddr({p}_araddr), .arlen({p}_arlen), .arvalid({p}_arvalid), .arready({p}_arready),
         .rdata({p}_rdata), .rvalid({p}_rvalid), .rlast({p}_rlast), .rresp({p}_rresp), .rready({p}_rready),
         .awaddr({p}_awaddr), .awlen({p}_awlen), .awvalid({p}_awvalid), .awready({p}_awready),
