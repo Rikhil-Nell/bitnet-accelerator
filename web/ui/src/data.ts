@@ -27,26 +27,25 @@ export const bytesPerToken = [
   { label: "v2: 1.6-bit layers + 1.6-bit coarse head", layers: 424, head: 66 },
 ];
 
-// Decode speed through the project (ms per generated token, short answers).
+// Decode speed through the project (ms per generated token, short answer, measured).
 export const milestones = [
   { step: "Original design (PC drives every matmul over UART)", ms: 519000 },
   { step: "Streaming engine, weights in DDR, int8 head", ms: 293 },
   { step: "NEON kernels + coarse ternary LM head", ms: 195 },
+  { step: "1.6-bit engine, overlap, 2 cores, speculation (100 MHz, USB power)", ms: 121 },
 ];
 
-// Per-token profile of the current firmware (us), decode of a short answer.
+// One pass of the current firmware (us), France prompt, engine at 100 MHz (USB power).
+// The engine stream includes the A9 epilogue work that runs while it streams.
 export const profile: Record<string, number> = {
-  PL_wait: 153023,
-  attention: 21736,
-  rmsnorm: 5234,
-  quantize: 4689,
-  dequant: 2435,
-  elementwise: 2561,
-  head_argmax: 2414,
-  inval_y: 2033,
-  rope: 902,
-  flush_x: 295,
-  embed: 38,
+  "engine stream": 153934,
+  attention: 6799,
+  quantize: 4489,
+  rope: 1615,
+  "norm stats": 1479,
+  "head rescoring": 547,
+  "x copy": 541,
+  embed: 112,
 };
 
 export const answers = [

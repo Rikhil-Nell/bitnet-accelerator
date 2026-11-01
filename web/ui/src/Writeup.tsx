@@ -108,7 +108,7 @@ function Milestones() {
   const lo = Math.log10(100), hi = Math.log10(1e6);
   const x = (ms: number) => ((Math.log10(ms) - lo) / (hi - lo)) * 560;
   return (
-    <svg viewBox="0 0 820 170" role="img" aria-label="Milliseconds per generated token over the project, log scale">
+    <svg viewBox="0 0 820 215" role="img" aria-label="Milliseconds per generated token over the project, log scale">
       <For each={milestones}>{(m, i) => (
         <g>
           <text x="0" y={22 + i() * 46} font-size="12.5">{m.step}</text>
@@ -118,7 +118,7 @@ function Milestones() {
           </text>
         </g>
       )}</For>
-      <text x="0" y="165" class="muted" font-size="11.5">log scale: each bar step to the left is 10× faster</text>
+      <text x="0" y="210" class="muted" font-size="11.5">log scale: each bar step to the left is 10× faster</text>
     </svg>
   );
 }
@@ -157,7 +157,7 @@ function ProfileBars() {
       <For each={entries}>{([k, v]) => (
         <div class="bar">
           <span>{k.replace("_", " ")}</span>
-          <div class="track"><div class="fill" style={{ width: `${(v / total) * 100}%`, background: k === "PL_wait" ? "var(--accent)" : "var(--accent-2)" }} /></div>
+          <div class="track"><div class="fill" style={{ width: `${(v / total) * 100}%`, background: k === "engine stream" ? "var(--accent)" : "var(--accent-2)" }} /></div>
           <span class="v">{(v / 1000).toFixed(1)} ms</span>
         </div>
       )}</For>
@@ -177,10 +177,10 @@ export default function Writeup() {
       </p>
 
       <div class="stats">
-        <div class="stat"><b>5.1</b><span>tokens / s (words-ish per second)</span></div>
+        <div class="stat"><b>8.25</b><span>tokens / s measured (USB power, engine at 100 MHz)</span></div>
         <div class="stat"><b>2.4 B</b><span>parameters, all on the board</span></div>
         <div class="stat"><b>95 %</b><span>of the DDR's peak bandwidth used</span></div>
-        <div class="stat"><b>2,700×</b><span>faster than our first design</span></div>
+        <div class="stat"><b>4,300×</b><span>faster than our first design</span></div>
       </div>
 
       <h2>1. What a language model actually computes</h2>
@@ -260,7 +260,7 @@ export default function Writeup() {
       <p>
         4.27 GB/s ÷ 32 bytes per clock (4 units × 8 bytes) = 133 MHz: the minimum clock at which the engine
         keeps up with the DRAM. We closed timing at 142.9 MHz by pipelining the adder tree and registering the
-        BRAM outputs. Using more logic would not help. That is why the FPGA is only 38 % full.
+        BRAM outputs. Using more logic would not make the stream faster: the FPGA is 53 % full, and most of that is the second adder tree for speculation (below).
       </p>
       <h3>A DRAM bank collision</h3>
       <p>
@@ -283,17 +283,18 @@ export default function Writeup() {
       <h3>Keeping the ARM out of the way</h3>
       <p>
         Everything that is not a big matrix runs on the ARM: normalization, quantization, attention, picking the
-        next token. Rewritten with NEON SIMD it dropped from 80 ms to about 40 ms per token. The engine also
-        exposes per-unit progress counters, so the ARM processes finished rows <em>while</em> the FPGA streams
-        the rest of the matrix.
+        next token. That was 80 ms per token. Rewritten with NEON SIMD, most of it now runs <em>while</em> the FPGA
+        streams: the engine exposes per-unit progress counters, so the ARM processes finished rows as soon as they
+        land in memory. The second ARM core takes half of the attention. What still waits for the ARM is about
+        16 ms per pass.
       </p>
 
       <h2>6. Where the time goes now</h2>
-      <p>Per generated token (short answer), as measured by the firmware's profiler:</p>
+      <p>One pass over the weights (two token positions), as measured by the firmware's profiler:</p>
       <div class="figure"><ProfileBars /></div>
       <p>
-        "PL wait" is the FPGA streaming weights at the memory limit. Attention grows with the length of the
-        conversation, since every new token looks back at all previous ones.
+        "Engine stream" is the FPGA streaming weights, with the ARM's epilogue work hidden inside it. Attention
+        grows with the length of the conversation, since every new token looks back at all previous ones.
       </p>
 
       <h2>7. Two tokens per pass: speculative decoding</h2>
@@ -320,9 +321,17 @@ export default function Writeup() {
 
       <h2>8. How far can it go?</h2>
       <p>
-        The DDR sets a hard floor: about 121 ms to stream the weights once. Everything else is either hidden
-        behind that stream (epilogues, the vocabulary ranking) or split across both ARM cores (attention).
-        What is left is the speculation hit rate, which grows slowly with more drafting data.
+        The DDR sets a hard floor: about 121 ms to stream the weights once at the full 142.9 MHz clock. Everything
+        else is either hidden behind that stream (epilogues, the vocabulary ranking) or split across both ARM
+        cores (attention). What is left is the speculation hit rate, which grows slowly with more drafting data.
+      </p>
+      <p>
+        One practical limit surprised us: <b>power</b>. Streaming memory at full rate with both ARM cores busy
+        draws more current than the board's USB input can supply, and the board browns out (it resets, and the
+        USB serial port disappears). A clock sweep showed the limit: 3.2 GB/s (100 MHz) survives, 3.55 GB/s does
+        not. So on USB power the engine runs at 83–100 MHz, which measured 8.25 tokens/s on a short answer. With
+        a 5 V supply and the full clock the same pipeline is projected at about 10 tokens/s on short answers and
+        about 9 on longer ones.
       </p>
       <p><a href="#/demo">Try it live →</a></p>
     </article>
