@@ -3,7 +3,7 @@
 
 Runs the board model on the GPU (gpu_model.py), batched.
 
-  python tools/bitnet/spec_corpus.py            # writes D:/xilinx-tools/spec_corpus.npz
+  python tools/bitnet/spec_corpus.py            # writes $BITNET_WORK/spec_corpus.npz
 
 Questions are generated from templates; the 12 evaluation prompts in
 eval_coarse_head.py are excluded so the table is judged on unseen questions.
@@ -20,7 +20,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from eval_coarse_head import PROMPTS as HELD_OUT  # noqa: E402
 from generate import HF_DIR  # noqa: E402
 
-OUT = Path("D:/xilinx-tools/spec_corpus.npz")
+from paths import WORK  # noqa: E402
+
+OUT = WORK / "spec_corpus.npz"
 
 COUNTRIES = ["Japan", "Germany", "Brazil", "Canada", "Australia", "India", "Egypt", "Kenya", "Mexico", "Italy",
              "Spain", "Norway", "Argentina", "China", "Russia", "Peru", "Chile", "Sweden", "Greece", "Turkey",

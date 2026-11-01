@@ -5,8 +5,10 @@ param(
     [string]$VivadoVersion = "2026.1"
 )
 
-$target = "D:\Xilinx\$VivadoVersion\Vivado\data\boards\board_files"
-$source = "D:\xilinx-tools\vivado-boards\new\board_files"
+$xr = if ($env:XILINX_ROOT) { $env:XILINX_ROOT } else { "D:\Xilinx" }
+$target = Join-Path $xr "$VivadoVersion\Vivado\data\boards\board_files"
+$work = if ($env:BITNET_WORK) { $env:BITNET_WORK } else { "D:\xilinx-tools" }
+$source = if ($env:BITNET_BOARD_FILES) { $env:BITNET_BOARD_FILES } else { Join-Path $work "vivado-boards\new\board_files" }
 
 if (-not (Test-Path $source)) {
     Write-Error "Missing board files at $source"

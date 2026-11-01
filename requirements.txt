@@ -1,0 +1,11 @@
+# Host-side Python (3.11+). See SETUP.md.
+numpy>=1.26
+tokenizers>=0.19
+pyserial>=3.5
+huggingface_hub>=0.23      # model download
+fastapi>=0.110             # web demo (web/server.py)
+uvicorn>=0.29
+websockets>=12
+# Optional, GPU tools only (gpu_model.py, corpora, eval_proj_head.py):
+#   pip install torch --index-url https://download.pytorch.org/whl/cu126
+# gguf (GGUF reader) comes from the bitnet.cpp checkout: $BITNET_CPP_ROOT/3rdparty/llama.cpp/gguf-py

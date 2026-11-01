@@ -15,9 +15,10 @@ os.environ["VITIS_EMBEDDED_INSTALL"] = "true"
 
 REPO = Path(__file__).resolve().parents[2]
 XSA = REPO / "build/vivado/bitnet_zybo.xsa"
-XSA_STAGE = Path(os.environ.get("BITNET_XSA", "D:/xilinx-tools/stage/bitnet_zybo.xsa"))
+WORK = Path(os.environ.get("BITNET_WORK", "D:/xilinx-tools"))
+XSA_STAGE = Path(os.environ.get("BITNET_XSA", str(WORK / "stage" / "bitnet_zybo.xsa")))
 # Avoid spaces in user profile paths — Vitis platform gen can reject them.
-WS = Path(os.environ.get("BITNET_VITIS_WS", "D:/xilinx-tools/vitis_ws"))
+WS = Path(os.environ.get("BITNET_VITIS_WS", str(WORK / "vitis_ws")))
 APP = os.environ.get("BITNET_PS_APP", "gemv_bench")
 PS_SRC = REPO / "fpga/ps" / APP
 

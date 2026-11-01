@@ -18,7 +18,9 @@ from pathlib import Path
 
 import numpy as np
 
-STATES = Path("D:/xilinx-tools/bitnet_head_states.npz")
+from paths import WORK  # noqa: E402
+
+STATES = WORK / "bitnet_head_states.npz"
 
 
 def load_runs(path: Path) -> list[tuple[list[int], list[int]]]:

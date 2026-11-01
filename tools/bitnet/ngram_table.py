@@ -15,14 +15,18 @@ costs the A9 work of the extra position. Keys are 32-bit FNV-1a hashes of
 from __future__ import annotations
 
 import argparse
+import sys
 from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
-CORPORA = [Path("D:/xilinx-tools/spec_corpus.npz"), Path("D:/xilinx-tools/spec_corpus2.npz")]
-HELD = Path("D:/xilinx-tools/bitnet_head_states.npz")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from paths import WORK  # noqa: E402
+
+CORPORA = [WORK / "spec_corpus.npz", WORK / "spec_corpus2.npz"]
+HELD = WORK / "bitnet_head_states.npz"
 OUT_H = ROOT / "fpga" / "ps" / "bitnet_zybo" / "ngram_table.h"
 MAX_ORDER = 3
 

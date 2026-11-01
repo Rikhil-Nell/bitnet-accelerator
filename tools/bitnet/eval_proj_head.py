@@ -19,7 +19,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from board_image import parse  # noqa: E402
 from pack_board import DEFAULT_OUT  # noqa: E402
 
-STATES = Path("D:/xilinx-tools/bitnet_head_states.npz")
+from paths import WORK  # noqa: E402
+
+STATES = WORK / "bitnet_head_states.npz"
 
 
 def ternary_rows(w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:

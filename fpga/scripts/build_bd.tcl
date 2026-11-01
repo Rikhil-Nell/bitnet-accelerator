@@ -5,7 +5,13 @@ set repo_root  [file normalize [file join [info script] .. .. ..]]
 set rtl_dir    [file join $repo_root rtl]
 set proj_dir   [file join $repo_root build bitnet_zybo]
 set out_dir    [file join $repo_root build vivado]
-set board_repo "D:/xilinx-tools/vivado-boards/new/board_files"
+# Digilent board files: $BITNET_BOARD_FILES, else $BITNET_WORK/vivado-boards/new/board_files
+if {[info exists ::env(BITNET_BOARD_FILES)] && $::env(BITNET_BOARD_FILES) ne ""} {
+  set board_repo $::env(BITNET_BOARD_FILES)
+} else {
+  set work [expr {[info exists ::env(BITNET_WORK)] ? $::env(BITNET_WORK) : "D:/xilinx-tools"}]
+  set board_repo "$work/vivado-boards/new/board_files"
+}
 set fclk_mhz   150
 if {[info exists ::env(BITNET_FCLK_MHZ)] && $::env(BITNET_FCLK_MHZ) ne ""} {
   set fclk_mhz $::env(BITNET_FCLK_MHZ)

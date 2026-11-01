@@ -25,3 +25,6 @@ __pycache__/
 # Web UI build outputs
 web/ui/node_modules/
 web/ui/dist/
+
+# Per-machine paths
+local.mk

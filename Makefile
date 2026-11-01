@@ -1,4 +1,10 @@
-# BitNet on Zybo Z7-10. Run `make help`.
+# BitNet on Zybo Z7-10. Run `make help`. Setup: SETUP.md.
+# Per-machine paths go in local.mk (not committed; see local.mk.example).
+-include local.mk
+XILINX_ROOT    ?= D:/Xilinx
+XILINX_VERSION ?= 2026.1
+BITNET_WORK    ?= D:/xilinx-tools
+export XILINX_ROOT XILINX_VERSION BITNET_WORK BITNET_GGUF BITNET_HF_DIR BITNET_CPP_ROOT BITNET_BOARD_FILES
 PYTHON ?= python
 COM    ?= COM4
 PS     := powershell -NoProfile
@@ -8,7 +14,7 @@ ENV    := . '$(CURDIR)/tools/setup/env.ps1';
 
 help:
 	@echo "Run it (board on, SD card with BITNET.BIN in the slot)"
-	@echo "  board [FCLK_DIV=7]  program the FPGA and boot the model (engine at 100 MHz; 7 = 142.9 MHz, 5 V supply)"
+	@echo "  board [FCLK_DIV=7]  program the FPGA and boot the model (engine at 83 MHz; 7 = 142.9 MHz, needs 5 V supply)"
 	@echo "  chat [COM=COM4]     chat with the model from this PC"
 	@echo "  demo [COM=COM4]     web page: write-up + live chat/profile, http://127.0.0.1:8000"
 	@echo "  demo-replay         the same page without a board (recorded answer)"
@@ -25,7 +31,7 @@ help:
 	@echo "  run-ps ELF=...      ps7_init + download and run an ELF on A9 #0"
 	@echo "  srst                JTAG system reset of the PS (A9 debug port stuck; then make board)"
 	@echo "Model"
-	@echo "  pack                write D:/xilinx-tools/BITNET.BIN from the GGUF (copy to SD root)"
+	@echo "  pack                write $(BITNET_WORK)/BITNET.BIN from the GGUF (copy to SD root)"
 	@echo "  generate-emulated PROMPT=...   reference generation on the PC (NumPy)"
 	@echo "  bitnet-cpp-build    build Microsoft bitnet.cpp (reference)"
 
@@ -45,7 +51,7 @@ ps-app:
 ps-app-rebuild:
 	$(VITIS) fpga/scripts/rebuild_ps_app_only.py
 
-WS_ELF = D:/xilinx-tools/vitis_ws/$(1)/build/$(1).elf
+WS_ELF = $(BITNET_WORK)/vitis_ws/$(1)/build/$(1).elf
 
 # Program, then (after stopping Vivado's hw_server, which can leave the A9 debug port
 # unreachable for xsdb) download and start the firmware.

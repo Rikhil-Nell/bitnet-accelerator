@@ -46,7 +46,8 @@ if (-not $loaded) {
     return
 }
 
-$boardRepo = "D:/xilinx-tools/vivado-boards/new/board_files"
+$work = if ($env:BITNET_WORK) { $env:BITNET_WORK } else { "D:/xilinx-tools" }
+$boardRepo = if ($env:BITNET_BOARD_FILES) { $env:BITNET_BOARD_FILES } else { "$work/vivado-boards/new/board_files" }
 $env:BOARD_REPO_PATHS = $boardRepo
 # Vivado Tcl param (used by batch scripts)
 $env:VIVADO_BOARD_REPO = $boardRepo

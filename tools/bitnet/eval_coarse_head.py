@@ -20,7 +20,9 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-STATES = Path("D:/xilinx-tools/bitnet_head_states.npz")
+from paths import WORK  # noqa: E402
+
+STATES = WORK / "bitnet_head_states.npz"
 PROMPTS = [
     "What is the capital of France?",
     "How many legs does a spider have?",

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Bigger, more varied corpus for the n-gram draft table: the model writes its own
 questions (sampled, one per topic and style), then answers them greedily, exactly as
-the board would. Appends to D:/xilinx-tools/spec_corpus2.npz.
+the board would. Appends to $BITNET_WORK/spec_corpus2.npz.
 
   python tools/bitnet/spec_corpus2.py --rounds 4
 """
@@ -18,7 +18,9 @@ from eval_coarse_head import PROMPTS as HELD_OUT  # noqa: E402
 from generate import HF_DIR  # noqa: E402
 from gpu_model import GpuBitNet, chat_prompt  # noqa: E402
 
-OUT = Path("D:/xilinx-tools/spec_corpus2.npz")
+from paths import WORK  # noqa: E402
+
+OUT = WORK / "spec_corpus2.npz"
 TOPICS = """animals plants oceans rivers mountains deserts weather climate volcanoes earthquakes planets stars
 galaxies the moon the sun gravity light sound electricity magnetism atoms molecules chemistry cells DNA genetics
 evolution the human body the heart the brain bones muscles nutrition vitamins sleep exercise diseases vaccines

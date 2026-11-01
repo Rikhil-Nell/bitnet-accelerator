@@ -8,7 +8,9 @@ param(
 )
 $ErrorActionPreference = "Stop"
 $Root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-$settings = "D:\Xilinx\2026.1\Vitis\settings64.bat"
+$xr = if ($env:XILINX_ROOT) { $env:XILINX_ROOT } else { "D:\Xilinx" }
+$xv = if ($env:XILINX_VERSION) { $env:XILINX_VERSION } else { "2026.1" }
+$settings = Join-Path $xr "$xv\Vitis\settings64.bat"
 $bat = Join-Path $env:TEMP "bitnet_vitis_run.bat"
 @"
 @echo off

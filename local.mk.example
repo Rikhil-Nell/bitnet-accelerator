@@ -1,0 +1,8 @@
+# Copy to local.mk (ignored by git) and adjust to your machine. Forward slashes.
+XILINX_ROOT    = C:/Xilinx
+XILINX_VERSION = 2026.1
+BITNET_WORK    = C:/bitnet-work
+COM            = COM5
+BITNET_GGUF    = C:/models/BitNet-b1.58-2B-4T-gguf/ggml-model-i2_s.gguf
+BITNET_HF_DIR  = C:/models/BitNet-b1.58-2B-4T
+BITNET_CPP_ROOT = C:/src/BitNet

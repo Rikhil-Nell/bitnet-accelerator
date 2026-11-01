@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pack BitNet b1.58 2B-4T from the I2_S GGUF into the board image (board_image.py).
 
-  python tools/bitnet/pack_board.py [--out D:/xilinx-tools/BITNET.BIN]
+  python tools/bitnet/pack_board.py [--out $BITNET_WORK/BITNET.BIN]
 
 Copy the result to the root of a FAT32 SD card as BITNET.BIN.
 """
@@ -22,7 +22,9 @@ from engine import quantize_rows_i8  # noqa: E402
 from engine_format import ALIGN, NU, pack_t5, t5_k  # noqa: E402
 from gguf_model import DEFAULT_GGUF, load_model  # noqa: E402
 
-DEFAULT_OUT = Path("D:/xilinx-tools/BITNET.BIN")
+from paths import WORK  # noqa: E402
+
+DEFAULT_OUT = WORK / "BITNET.BIN"
 
 
 class Writer:
